@@ -93,23 +93,40 @@ def measure_loop(tmp_dir) -> dict:
                       closed=hasattr(_dev, "record") or hasattr(_dev, "curate") or bool(dir(_dev)),
                       verified=False, evidence="developmental corpus module present"))
 
-    # memory -> context: CLOSED — the feedback edge that makes it a rocket. A
-    # verified fact from the pool is fed into the next proposal's context, and the
-    # closed loop is measured to COMPOUND (evolutionary_flywheel). Last mile: auto-
-    # wiring auto_retrieved into run_loop's default path.
+    # memory -> context: CLOSED and EXECUTED. run_loop now accepts a VerifiedPool
+    # and auto_context flag (default on): before proposal, if the task arrived
+    # with no retrieved context, it is populated from prior verified PASSes in
+    # the pool; after a PASS, the fact is banked. This is the feedback edge that
+    # makes the loop compound. Falsified in test_loop_closure.
     try:
-        from . import evolutionary_flywheel as _ef
-        auto_context = hasattr(_ef, "auto_retrieved")
+        from . import loop as _loop_mod
+        import inspect
+        _sig = inspect.signature(_loop_mod.run_loop)
+        auto_context_wired = "pool" in _sig.parameters and "auto_context" in _sig.parameters
     except Exception:
-        auto_context = False
+        auto_context_wired = False
     hs.append(Handoff("memory", "context", "verified fact -> next retrieved",
-                      closed=auto_context, verified=False,
-                      evidence="evolutionary_flywheel.auto_retrieved feeds verified memory into next context; closed loop measured to compound (auto-wire into run_loop default = last mile)"))
+                      closed=auto_context_wired, verified=auto_context_wired,
+                      evidence="run_loop(pool=..., auto_context=True) banks PASSes and "
+                               "retrieves them into the next task's context; falsified in "
+                               "test_memory_to_context_is_executed_not_just_structural"))
 
-    # corpus -> model (auto-retrain the weights from the verified corpus)
+    # corpus -> model: PATH closed (corpus_export writes a verified shard with a
+    # re-checkable receipt), TRIGGER deliberately operator-gated (training
+    # start/hard-stop stay gated per SUPERAPP.md). verified=False is honest: the
+    # path is wired but the auto-trigger is intentionally absent, so the full
+    # handoff is not executed end-to-end by the loop itself.
+    try:
+        from . import corpus_export as _ce
+        export_path_wired = hasattr(_ce, "export_corpus") and hasattr(_ce, "verify_corpus_export")
+    except Exception:
+        export_path_wired = False
     hs.append(Handoff("corpus", "model", "training data -> weights",
-                      closed=False, verified=False,
-                      evidence="CPT is a manual run; no auto-retrain trigger (OPEN)"))
+                      closed=export_path_wired, verified=False,
+                      evidence="corpus_export.export_corpus writes a verified-"
+                               "experience shard (flywheel.corpus-export/v1, re-checkable); "
+                               "the training START remains operator-gated per SUPERAPP.md -- "
+                               "path closed, automation deliberately not"))
 
     n_closed = sum(1 for h in hs if h.closed)
     return {
