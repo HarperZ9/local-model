@@ -113,6 +113,25 @@ def test_player_html_has_no_external_urls(tmp_path):
         assert not attr_match.group(1).lower().startswith(("http://", "https://", "//"))
 
 
+def test_player_html_matches_telos_v2_accessibility_contract(tmp_path):
+    script = write_script(tmp_path, sample_steps())
+    result = record_demo(script, "telos-demo", out_root=tmp_path / "demos", dry_run=True)
+    html_text = Path(result["player_path"]).read_text(encoding="utf-8")
+
+    assert 'class="skip-link" href="#terminal"' in html_text
+    assert 'aria-live="polite"' in html_text
+    assert ":focus-visible" in html_text
+    assert "outline:" in html_text
+    assert "@media (prefers-reduced-motion: reduce)" in html_text
+    assert 'font-family: "Hanken Grotesk", "Segoe UI", sans-serif' in html_text
+    assert 'font-family: "Conso", "Cascadia Mono", Consolas, monospace' in html_text
+    assert "border-left: 3px" not in html_text
+    assert "border: 1px solid var(--edge); border-radius: 8px" in html_text
+    assert ".cursor { animation: none; }" in html_text
+    assert "if (steps.length) { paint(false); }" in html_text
+    assert EXTERNAL_URL_ATTR.search(html_text) is None
+
+
 def test_load_demo_script_rejects_incomplete_steps(tmp_path):
     path = tmp_path / "bad.json"
     path.write_text(json.dumps([{"title": "no command", "narration": "x"}]), encoding="utf-8")

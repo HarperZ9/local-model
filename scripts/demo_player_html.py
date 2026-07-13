@@ -17,18 +17,27 @@ _PAGE = """<!doctype html>
 <title>__TITLE__ | demo player</title>
 <style>
   :root {
-    --bg: #0b0f14; --panel: #10161d; --edge: #1f2a35; --ink: #d7e0e8;
-    --dim: #7b8a97; --green: #4ec9a4; --amber: #e0af68; --red: #e06c75;
+    --bg: #17101f; --panel: #21172a; --edge: #493753; --ink: #f7f3f8;
+    --dim: #ad9ab8; --signal: #66d9dc; --warning: #e4b86a; --failure: #ef7a8a;
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--ink);
-    font-family: "Cascadia Mono", "Consolas", "Courier New", monospace;
+    font-family: "Hanken Grotesk", "Segoe UI", sans-serif;
   }
+  .skip-link {
+    position: fixed; left: 12px; top: 12px; z-index: 10; transform: translateY(-200%);
+    padding: 8px 12px; border-radius: 6px; background: var(--ink); color: var(--bg);
+  }
+  .skip-link:focus-visible { transform: translateY(0); outline: 3px solid var(--signal); outline-offset: 2px; }
+  button:focus-visible { outline: 3px solid var(--signal); outline-offset: 2px; }
   main { width: min(960px, calc(100vw - 24px)); margin: 0 auto; padding: 28px 0 60px; }
   header { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: baseline; margin-bottom: 14px; }
-  h1 { margin: 0; font-size: 1.15rem; letter-spacing: 0.04em; color: var(--green); }
+  h1 { margin: 0; font-size: 1.15rem; letter-spacing: 0.04em; color: var(--signal); }
   .meta { color: var(--dim); font-size: 0.78rem; }
+  .meta, .terminal, .stepname, .status {
+    font-family: "Conso", "Cascadia Mono", Consolas, monospace;
+  }
   .terminal {
     background: var(--panel); border: 1px solid var(--edge); border-radius: 8px;
     min-height: 340px; padding: 16px 18px; white-space: pre-wrap; overflow-wrap: anywhere;
@@ -36,17 +45,17 @@ _PAGE = """<!doctype html>
   }
   .titlebar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
   .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--edge); }
-  .dot.r { background: var(--red); } .dot.a { background: var(--amber); } .dot.g { background: var(--green); }
+  .dot.r { background: var(--failure); } .dot.a { background: var(--warning); } .dot.g { background: var(--signal); }
   .stepname { color: var(--dim); font-size: 0.78rem; margin-left: 8px; }
-  .cmd { color: var(--amber); }
+  .cmd { color: var(--warning); }
   .out { color: var(--ink); }
-  .fail { color: var(--red); }
-  .cursor { display: inline-block; width: 0.55em; height: 1em; background: var(--green);
+  .fail { color: var(--failure); }
+  .cursor { display: inline-block; width: 0.55em; height: 1em; background: var(--signal);
             vertical-align: text-bottom; animation: blink 0.9s steps(1) infinite; }
   @keyframes blink { 50% { opacity: 0; } }
   .caption {
-    margin-top: 12px; padding: 10px 14px; border-left: 3px solid var(--green);
-    background: rgba(78, 201, 164, 0.07); color: var(--ink);
+    margin-top: 12px; padding: 10px 14px; border: 1px solid var(--edge); border-radius: 8px;
+    background: rgba(102, 217, 220, 0.06); color: var(--ink);
     font-size: 0.86rem; line-height: 1.55; min-height: 2.6em;
   }
   .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 14px; }
@@ -54,13 +63,17 @@ _PAGE = """<!doctype html>
     background: var(--panel); color: var(--ink); border: 1px solid var(--edge);
     border-radius: 6px; padding: 7px 14px; font: inherit; font-size: 0.8rem; cursor: pointer;
   }
-  button:hover { border-color: var(--green); color: var(--green); }
+  button:hover { border-color: var(--signal); color: var(--signal); }
   .status { color: var(--dim); font-size: 0.78rem; margin-left: auto; }
-  .exit-ok { color: var(--green); } .exit-bad { color: var(--red); }
-  progress { width: 100%; height: 4px; margin-top: 10px; accent-color: var(--green); }
+  .exit-ok { color: var(--signal); } .exit-bad { color: var(--failure); }
+  progress { width: 100%; height: 4px; margin-top: 10px; accent-color: var(--signal); }
+  @media (prefers-reduced-motion: reduce) {
+    .cursor { animation: none; }
+  }
 </style>
 </head>
 <body>
+<a class="skip-link" href="#terminal">Skip to terminal output</a>
 <main>
   <header>
     <h1>__TITLE__</h1>
@@ -72,7 +85,7 @@ _PAGE = """<!doctype html>
     <span class="dot r"></span><span class="dot a"></span><span class="dot g"></span>
     <span class="stepname" id="stepname"></span>
   </div>
-  <div class="terminal" id="terminal"></div>
+  <div class="terminal" id="terminal" tabindex="-1"></div>
   <div class="caption" id="caption"></div>
   <progress id="bar" max="1" value="0"></progress>
   <div class="controls">
@@ -80,7 +93,7 @@ _PAGE = """<!doctype html>
     <button id="prev">Prev step</button>
     <button id="next">Next step</button>
     <button id="restart">Restart</button>
-    <span class="status" id="status"></span>
+    <span class="status" id="status" aria-live="polite"></span>
   </div>
 </main>
 <script id="transcript-data" type="application/json">__DATA__</script>
@@ -169,7 +182,7 @@ _PAGE = """<!doctype html>
   document.getElementById("restart").addEventListener("click", function () {
     stop(); stepIndex = 0; charIndex = 0; paint(true); start();
   });
-  if (steps.length) { charIndex = 0; paint(true); }
+  if (steps.length) { paint(false); }
 })();
 </script>
 </body>
