@@ -32,7 +32,7 @@
 - Consumes: existing JSON steps with `title`, `command`, and `narration`.
 - Produces: `execute_step(step: dict, *, index: int, dry_run: bool, timeout_seconds: float = DEFAULT_STEP_TIMEOUT_SECONDS, cwd: Path | None = None, run_temp: Path | None = None, inherited_env: Mapping[str, str] | None = None) -> dict`, transcript fields `publishable`, `cleanup_ok`, and per-step fields `display_command`, `capture`, `assertions`, `assertions_passed`, and `redaction_count`.
 
-- [ ] **Step 1: Add failing tests for defaults, declared assertions, and the CLI gate**
+- [x] **Step 1: Add failing tests for defaults, declared assertions, and the CLI gate**
 
 Add tests that prove an undeclared successful step remains publishable, an exit code outside `expected_exit_codes` is recorded with `assertions_passed == False`, a missing literal from `expect` fails, and `main()` returns `1` for a non-publishable transcript. Use only `python -c` commands and `tmp_path`.
 
@@ -66,13 +66,13 @@ def test_main_returns_one_when_publish_gate_fails(tmp_path):
     ]) == 1
 ```
 
-- [ ] **Step 2: Run the focused tests and confirm they fail for missing behavior**
+- [x] **Step 2: Run the focused tests and confirm they fail for missing behavior**
 
 Run: `python -m pytest tests/test_demo_recorder.py -q`
 
 Expected: the new assertions fail because the transcript has no publishability or assertion metadata and `main()` always returns `0`.
 
-- [ ] **Step 3: Add execution-context and assertion helpers**
+- [x] **Step 3: Add execution-context and assertion helpers**
 
 Implement these exact contracts in `scripts/demo_recorder.py`:
 
@@ -111,7 +111,7 @@ def _evaluate_assertions(step: dict, exit_code: int, output: str) -> dict:
 
 Validate that `expected_exit_codes` is a non-empty list of integers, `expect`, `env_allowlist`, and `redact_patterns` are lists of non-empty strings, and `capture` is one of `CAPTURE_TYPES` during `load_demo_script()`.
 
-- [ ] **Step 4: Add failing tests for built-in and explicit redaction**
+- [x] **Step 4: Add failing tests for built-in and explicit redaction**
 
 ```python
 def test_sensitive_values_are_redacted_before_hash_and_render(tmp_path, monkeypatch):
@@ -133,25 +133,25 @@ def test_sensitive_values_are_redacted_before_hash_and_render(tmp_path, monkeypa
     assert result["transcript"]["steps"][0]["redaction_count"] >= 4
 ```
 
-- [ ] **Step 5: Implement redaction before receipt generation**
+- [x] **Step 5: Implement redaction before receipt generation**
 
 Create `scrub_text(text: str, explicit_patterns: Sequence[str] = ()) -> tuple[str, int]`. Apply concrete home-directory and username replacements first, then case-insensitive email, Windows absolute-path, Bearer token, OpenAI token, GitHub token, and credential-assignment patterns, followed by `re.escape()` for each explicit pattern. Use the stable replacement labels `[redacted-home]`, `[redacted-email]`, `[redacted-path]`, `[redacted-token]`, `[redacted-credential]`, and `[redacted-explicit]`. Scrub `title`, `narration`, the displayed command, stdout, stderr, and combined output before calculating `output_sha256`.
 
-- [ ] **Step 6: Create unique temporary state and cleanup evidence**
+- [x] **Step 6: Create unique temporary state and cleanup evidence**
 
 Wrap step execution in `tempfile.TemporaryDirectory(prefix=f"demo-{name}-")`. Pass its `Path` to every step as `run_temp`; replace the literal token `{demo_temp}` in execution commands and `cwd`, but never in `display_command`. On normal context-manager exit set `cleanup_ok = True`. If cleanup raises, retain the transcript, set `cleanup_ok = False`, set `publishable = False`, and omit the absolute path from the serialized result.
 
-- [ ] **Step 7: Calculate transcript publishability and CLI exit status**
+- [x] **Step 7: Calculate transcript publishability and CLI exit status**
 
 Set `publishable` to true only when every step has `assertions_passed`, no forbidden value survives the post-scrub scan, and cleanup succeeds. Print `publishable: yes|no` in `main()`, then return `0 if transcript["publishable"] else 1`.
 
-- [ ] **Step 8: Run recorder tests**
+- [x] **Step 8: Run recorder tests**
 
 Run: `python -m pytest tests/test_demo_recorder.py -q`
 
 Expected: all existing and new recorder tests pass.
 
-- [ ] **Step 9: Run diff and secret-shape checks**
+- [x] **Step 9: Run diff and secret-shape checks**
 
 Run:
 
