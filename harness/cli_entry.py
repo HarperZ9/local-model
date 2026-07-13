@@ -60,9 +60,94 @@ def find_repo_root() -> Path:
     )
 
 
+def _parse_lane_args(argv: list[str]) -> tuple[str, str]:
+    """Parse --lanes <list|all> and --profile <source|package> from argv.
+    Defaults: all lanes, package profile."""
+    lanes = "all"
+    profile = "package"
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--lanes",) and i + 1 < len(argv):
+            lanes = argv[i + 1]; i += 2; continue
+        if a in ("--profile",) and i + 1 < len(argv):
+            profile = argv[i + 1]; i += 2; continue
+        i += 1
+    return lanes, profile
+
+
+def _cmd_install(argv: list[str]) -> int:
+    """`flywheel install [--lanes all|index,gather,...] [--profile source|package]`.
+
+    Pip/npm install the flagship lanes and record the result in the lane
+    registry (~/.flywheel/lanes.json). Idempotent: re-runs upgrade a lane."""
+    import json as _json
+    from harness.lanes import LANES, install_lane, write_registry, read_registry, LANE_REGISTRY_PATH
+    lanes_arg, profile = _parse_lane_args(argv)
+    if lanes_arg == "all":
+        names = [n for n, l in LANES.items() if l.kind != "bundled"]
+    else:
+        names = [n.strip() for n in lanes_arg.split(",") if n.strip()]
+        bad = [n for n in names if n not in LANES]
+        if bad:
+            print(f"unknown lane(s): {bad}; known: {list(LANES)}", file=sys.stderr)
+            return 2
+    print(f"Flywheel install -- {len(names)} lane(s), profile={profile}")
+    registry = read_registry()
+    n_ok = 0
+    for name in names:
+        lane = LANES[name]
+        print(f"  installing {name} ({lane.kind}: {lane.install_name}) ...", end=" ", flush=True)
+        r = install_lane(name, profile=profile)
+        ok = r["installed"]
+        print("OK" if ok else "FAILED")
+        if not ok:
+            det = r.get("detail", "")
+            print(f"    {det[:200]}", file=sys.stderr)
+        registry[name] = {"install_name": lane.install_name, "kind": lane.kind,
+                          "profile": profile, "installed": ok,
+                          "version": lane.version}
+        if ok:
+            n_ok += 1
+    write_registry(registry)
+    print(f"\n{n_ok}/{len(names)} lanes installed. Registry: {LANE_REGISTRY_PATH}")
+    return 0 if n_ok == len(names) else 1
+
+
+def _cmd_up(argv: list[str]) -> int:
+    """`flywheel up [--port 8799] [--probe]` -- start the one surface.
+
+    Preflight: print the lane roster so the operator sees what is live before
+    the gateway starts. Then delegate to the existing `app` subcommand (which
+    launches harness/gateway.py). The gateway serves /api/lanes, /api/world,
+    and the shell on one origin."""
+    import sys as _sys
+    # Preflight lane roster (fast, install-presence only, unless --probe).
+    probe = "--probe" in argv
+    from harness.lanes import lane_roster, lane_report
+    print(lane_report(lane_roster(probe=probe)))
+    print()
+    # Strip our flags and delegate to `app` (the gateway launcher).
+    gateway_argv = [a for a in argv if a not in ("--probe",)]
+    if not any(a == "--port" for a in gateway_argv):
+        gateway_argv = ["--port", "8799"] + gateway_argv
+    print("Starting the gateway ...")
+    _sys.stdout.flush()
+    # Re-invoke run_harness_cli.py with `app` + our port/flags.
+    repo_root = find_repo_root()
+    os.chdir(repo_root)
+    import runpy
+    script = repo_root / "scripts" / "run_harness_cli.py"
+    _sys.argv = [str(script), "app", *gateway_argv]
+    try:
+        runpy.run_path(str(script), run_name="__main__")
+    except SystemExit as exc:
+        return int(exc.code or 0)
+    return 0
+
+
 def _dispatch_umbrella(command: str, argv: list[str]) -> int:
     """Handle the new umbrella subcommands. Phase 2/3 implement these fully."""
-    repo_root = find_repo_root()
     if command == "loop-status":
         from harness.loop_closure import measure_loop, loop_report
         import tempfile
@@ -79,10 +164,14 @@ def _dispatch_umbrella(command: str, argv: list[str]) -> int:
         roster = lane_roster()
         print(lane_report(roster))
         return 0
-    if command in {"install", "up", "down"}:
-        print(f"`flywheel {command}` is part of the lane layer (Phase 2/3).", file=sys.stderr)
-        print("Not yet wired in this build. See the umbrella plan.", file=sys.stderr)
-        return 2
+    if command == "install":
+        return _cmd_install(argv)
+    if command == "up":
+        return _cmd_up(argv)
+    if command == "down":
+        print("`flywheel down` stops a gateway started by `flywheel up`.", file=sys.stderr)
+        print("On Windows, close the gateway process (Ctrl-C in its console).", file=sys.stderr)
+        return 0
     if command == "corpus-export":
         # Gap E: export verified envelopes to a training shard (operator-gated).
         import json as _json
@@ -110,6 +199,21 @@ def main(argv: list[str] | None = None) -> int:
         return _dispatch_umbrella(command, rest)
     # Passthrough: re-invoke scripts/run_harness_cli.py from the repo root so
     # its cwd-relative subprocess dispatch (build_command) resolves correctly.
+    # When frozen (PyInstaller exe), the scripts/ dir is not bundled; for the
+    # `app` command we import harness.gateway directly, and for other commands
+    # we report they need a source checkout.
+    if getattr(sys, "frozen", False):
+        if command == "app":
+            # The gateway is importable from the bundled harness package.
+            # Strip the "app" command name; gateway.main takes --port/--root/etc.
+            from harness.gateway import main as _gw_main
+            gw_args = [a for a in raw if a != "app"]
+            return _gw_main(gw_args)
+        print(f"`flywheel {command}` requires a source checkout (scripts/run_harness_cli.py).",
+              file=sys.stderr)
+        print("Run from a checkout, or use the umbrella commands "
+              "(lanes, loop-status, install, up, corpus-export).", file=sys.stderr)
+        return 2
     repo_root = find_repo_root()
     os.chdir(repo_root)
     script = repo_root / "scripts" / "run_harness_cli.py"

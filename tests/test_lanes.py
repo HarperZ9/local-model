@@ -77,3 +77,35 @@ def test_node_lanes_resolve_to_absolute_source_path_when_repo_present():
     # when the source checkout is present, the path is absolute
     if len(cmd) > 1 and cmd[1] not in ("demo/telos-mcp.mjs",):
         assert cmd[1].endswith("telos-mcp.mjs")
+
+
+def test_install_lane_arg_parser_defaults():
+    from harness.cli_entry import _parse_lane_args
+    lanes, profile = _parse_lane_args([])
+    assert lanes == "all"
+    assert profile == "package"
+
+
+def test_install_lane_arg_parser_explicit():
+    from harness.cli_entry import _parse_lane_args
+    lanes, profile = _parse_lane_args(["--lanes", "index,gather", "--profile", "source"])
+    assert lanes == "index,gather"
+    assert profile == "source"
+
+
+def test_install_lane_bundled_is_noop():
+    # The bundled lane (local-model) needs no install; install_lane reports OK.
+    from harness.lanes import install_lane
+    r = install_lane("local-model")
+    assert r["installed"] is True
+    assert "bundled" in r["detail"]
+
+
+def test_registry_roundtrip(tmp_path, monkeypatch):
+    # write_registry -> read_registry preserves the data.
+    import json
+    from harness.lanes import write_registry, read_registry, LANE_REGISTRY_PATH
+    monkeypatch.setattr("harness.lanes.LANE_REGISTRY_PATH", tmp_path / "lanes.json")
+    write_registry({"index": {"install_name": "index-graph", "installed": True}})
+    loaded = read_registry()
+    assert loaded["index"]["installed"] is True
