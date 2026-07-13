@@ -405,3 +405,97 @@ def test_surviving_forbidden_value_blocks_publication(tmp_path, monkeypatch):
     result = record_demo(script, "SURVIVING-FORBIDDEN", out_root=tmp_path / "demos")
 
     assert result["transcript"]["publishable"] is False
+
+
+def test_redact_patterns_scrub_every_step_before_hash_and_render(tmp_path):
+    secret = "CROSS-STEP-SECRET"
+    script = write_script(tmp_path, [
+        {
+            "title": "Declare shared redaction",
+            "command": 'python -c "print(\'safe\')"',
+            "narration": "One declaration protects the complete transcript.",
+            "redact_patterns": [secret],
+        },
+        {
+            "title": "Use shared redaction",
+            "command": f'python -c "print(\'{secret}\')"',
+            "display_command": f"tool inspect {secret}.json",
+            "narration": f"The shared marker {secret} never leaves this step.",
+        },
+    ])
+
+    result = record_demo(script, "cross-step-demo", out_root=tmp_path / "demos")
+    transcript = result["transcript"]
+    serialized = json.dumps(transcript)
+    html_text = Path(result["player_path"]).read_text(encoding="utf-8")
+    protected_step = transcript["steps"][1]
+
+    assert secret not in serialized
+    assert secret not in html_text
+    assert protected_step["redaction_count"] >= 3
+    assert protected_step["output_sha256"] == hashlib.sha256(
+        protected_step["output"].encode()
+    ).hexdigest()
+    assert transcript["publishable"] is True
+
+
+def test_transcript_wide_patterns_govern_final_publishability_scan(tmp_path, monkeypatch):
+    secret = "CROSS-STEP-SECRET"
+    monkeypatch.setattr(demo_recorder, "scrub_text", lambda text, explicit_patterns=(): (text, 0))
+    script = write_script(tmp_path, [
+        {
+            "title": "Declare shared redaction",
+            "command": 'python -c "print(\'safe\')"',
+            "narration": "The first step declares the transcript policy.",
+            "redact_patterns": [secret],
+        },
+        {
+            "title": "Surviving value",
+            "command": 'python -c "print(\'ready\')"',
+            "narration": f"A surviving {secret} blocks publication.",
+        },
+    ])
+
+    result = record_demo(script, "cross-step-scan", out_root=tmp_path / "demos")
+
+    assert result["transcript"]["publishable"] is False
+
+
+def test_record_demo_returns_deduplicated_console_patterns_outside_transcript(tmp_path):
+    script = write_script(tmp_path, [
+        {
+            **sample_steps()[0],
+            "redact_patterns": ["FIRST-PATTERN", "SHARED-PATTERN"],
+        },
+        {
+            **sample_steps()[1],
+            "redact_patterns": ["SHARED-PATTERN", "SECOND-PATTERN"],
+        },
+    ])
+
+    result = record_demo(script, "pattern-demo", out_root=tmp_path / "demos")
+
+    assert result["_console_redact_patterns"] == (
+        "FIRST-PATTERN",
+        "SHARED-PATTERN",
+        "SECOND-PATTERN",
+    )
+    assert "_console_redact_patterns" not in result["transcript"]
+
+
+def test_main_loads_demo_script_once(tmp_path, monkeypatch):
+    script = write_script(tmp_path, [sample_steps()[0]])
+    real_load_demo_script = demo_recorder.load_demo_script
+    loaded_paths = []
+
+    def tracking_load_demo_script(path):
+        loaded_paths.append(Path(path))
+        return real_load_demo_script(path)
+
+    monkeypatch.setattr(demo_recorder, "load_demo_script", tracking_load_demo_script)
+
+    assert main([
+        "--script", str(script), "--name", "single-load",
+        "--out-root", str(tmp_path / "demos"),
+    ]) == 0
+    assert loaded_paths == [script]

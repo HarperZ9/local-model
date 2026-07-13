@@ -315,6 +315,9 @@ def record_demo(
     cwd: Path | None = None,
 ) -> dict:
     script_steps = load_demo_script(script_path)
+    effective_redact_patterns = tuple(dict.fromkeys(
+        pattern for step in script_steps for pattern in step.get("redact_patterns", [])
+    ))
     results: list[dict] = []
     execution_finished = False
     cleanup_ok = False
@@ -323,7 +326,7 @@ def record_demo(
             run_temp = Path(temporary_path)
             results = [
                 execute_step(
-                    step,
+                    {**step, "redact_patterns": list(effective_redact_patterns)},
                     index=index,
                     dry_run=dry_run,
                     timeout_seconds=timeout_seconds,
@@ -339,18 +342,15 @@ def record_demo(
     else:
         cleanup_ok = True
 
-    explicit_patterns = [
-        pattern for step in script_steps for pattern in step.get("redact_patterns", [])
-    ]
-    safe_name, _name_redaction_count = scrub_text(name, explicit_patterns)
+    safe_name, _name_redaction_count = scrub_text(name, effective_redact_patterns)
     transcript = build_transcript(safe_name, results, dry_run=dry_run)
     forbidden_value_survived = _has_forbidden_value(
-        safe_name, explicit_patterns
+        safe_name, effective_redact_patterns
     ) or any(
         _has_forbidden_value(
-            json.dumps(result, ensure_ascii=False), step.get("redact_patterns", [])
+            json.dumps(result, ensure_ascii=False), effective_redact_patterns
         )
-        for step, result in zip(script_steps, results, strict=True)
+        for result in results
     )
     transcript["cleanup_ok"] = cleanup_ok
     transcript["publishable"] = (
@@ -369,6 +369,7 @@ def record_demo(
         "transcript": transcript,
         "transcript_path": str(transcript_path),
         "player_path": str(player_path),
+        "_console_redact_patterns": effective_redact_patterns,
     }
 
 
@@ -382,11 +383,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     script_path = Path(args.script)
-    console_redact_patterns = [
-        pattern
-        for step in load_demo_script(script_path)
-        for pattern in step.get("redact_patterns", [])
-    ]
     result = record_demo(
         script_path,
         args.name,
@@ -395,6 +391,7 @@ def main(argv: list[str] | None = None) -> int:
         timeout_seconds=args.timeout_seconds,
     )
     transcript = result["transcript"]
+    console_redact_patterns = result["_console_redact_patterns"]
     print(f"recorded {transcript['step_count']} steps in {transcript['total_duration_ms']} ms")
     for step in transcript["steps"]:
         print(
