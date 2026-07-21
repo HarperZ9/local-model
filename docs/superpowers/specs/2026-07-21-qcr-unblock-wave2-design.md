@@ -192,8 +192,11 @@ For every replay row the generator:
    expected portable measurement digest equals
    `measurement_contract_sha256`; a swapped descriptor therefore fails closed;
 2. resolves the descriptor against the supplied state;
-3. returns UNVERIFIABLE for a missing memory, DRIFT for a changed grounding
-   identity, otherwise delegates to `check_memory`;
+3. fails the pack-generation command if the target memory or grounding identity
+   no longer matches the descriptor, because that is a claim/subject binding
+   failure rather than a replayed measurement; otherwise it delegates to
+   `check_memory`, which returns UNVERIFIABLE for missing sources and DRIFT for
+   changed source content;
 4. recomputes only `deviation` through the existing `_deviation` mapping
    (`MATCH -> 0.0`, `DRIFT -> 1.0`, `UNVERIFIABLE -> null`); and
 5. copies the assessment-bound claim hash, tolerance, method, measurement time,
@@ -204,6 +207,12 @@ The output retains the Mneme verdict and reason as non-sealed diagnostic data.
 Crucible then performs its existing seal, thesis, verdict-rederivation, and
 measurement-replay checks. No Crucible production change is expected unless the
 real integration test proves an incompatibility.
+
+Before relying on that oracle, `check_memory` must recompute each current source
+row's content hash from its actual fields (turn: role/text; memory:
+text/source_ids/criterion) and compare it to both the row's stored hash and the
+extraction snapshot. A row whose text was changed while its stored hash was left
+stale is DRIFT, never MATCH.
 
 The active target is the preserved schema-v2 export at
 `C:/dev/scratch/qcr-2026-07-21-01/run-001/mneme-export-utf8.json` (SHA-256
@@ -218,8 +227,9 @@ Its five pre-change MATCH rows are, in order:
 4. `849a783ce3bd4960`
 5. `18987a65c43aba4a`
 
-Required falsifiers cover those five descriptor-bearing rows, fresh replay, source
-drift, memory update, missing memory, malformed/tampered templates, unsupported
+Required falsifiers cover those five descriptor-bearing rows, fresh replay, raw
+source-row tamper, ordinary source drift, target-memory binding change, missing
+source, malformed/tampered templates, unsupported
 oracles, wrong claim bindings, and exact end-to-end acceptance by Crucible.
 
 ### Lane C: bounded existing endpoint
