@@ -66,10 +66,14 @@ WSL, introduce a daemon, add a model, or create a new orchestration system.
   at the terminal gate.
 - The endpoint must bind only to an unused `127.0.0.1` port. Wildcard/LAN binds,
   firewall changes, and displacement of an existing listener are prohibited.
-- No Ollama alias is created or removed in this wave. If the recorded
-  `flywheel-local-coder-14b` alias is not already registered, the lane records
-  the verified artifact/profile as the identified endpoint target and stops
-  before model-store mutation.
+- No Ollama alias is created or removed in this wave. Preflight may use an
+  already registered alias only when its local Ollama manifest names a model
+  layer with the exact release GGUF digest and byte length. The current store
+  exposes `telos-coder-14b` with layer
+  `sha256:613db240e3efc6730f24042a4602d1f12f1c6b397af1d5a4d74f4e064d4064be`
+  and 8,988,110,880 bytes; this is revalidated before startup. If no such alias
+  exists, the lane records the verified artifact/profile as the identified
+  endpoint target and stops before model-store mutation.
 
 ## Architecture
 
@@ -205,8 +209,11 @@ For every replay row the generator:
 
 The output retains the Mneme verdict and reason as non-sealed diagnostic data.
 Crucible then performs its existing seal, thesis, verdict-rederivation, and
-measurement-replay checks. No Crucible production change is expected unless the
-real integration test proves an incompatibility.
+measurement-replay checks. One generic Crucible hardening is required by the
+real contract review: when a selected assessment is supplied to the replay-pack
+loader, omission of the pack's `assessment` object must fail closed rather than
+skip the binding check. The existing exact three-field comparison remains
+unchanged.
 
 Before relying on that oracle, `check_memory` must recompute each current source
 row's content hash from its actual fields (turn: role/text; memory:
@@ -244,8 +251,9 @@ The bounded run is:
 
 1. prove TCP port `11439` is unused and record all existing Ollama processes;
 2. re-hash the GGUF, require at least 12 GiB free GPU memory as an explicit
-   implementation safety control, and confirm that alias
-   `flywheel-local-coder-14b` already exists without mutating the model store;
+   implementation safety control, and confirm from the read-only local Ollama
+   manifest that an existing alias (currently `telos-coder-14b`) resolves to the
+   exact GGUF layer without mutating the model store;
 3. set `OLLAMA_HOST=127.0.0.1:11439` and start `ollama serve` hidden only if the
    preflight is clean;
 4. within 60 seconds, require a listener owned by the wave-started process on
@@ -266,7 +274,7 @@ The bounded run is:
 After the server process starts, a 360-second overall lifecycle deadline covers
 every remaining phase. `/api/tags` has a 10-second HTTP deadline. Cleanup runs
 from `finally` regardless of health, generation, oracle, or receipt failure:
-`ollama stop flywheel-local-coder-14b` is bounded to 15 seconds, normal
+`ollama stop <verified-existing-alias>` is bounded to 15 seconds, normal
 termination of the recorded wave PID is bounded to 15 seconds, and a still-live
 recorded PID is force-terminated by PID within 5 seconds. A final port-closure
 poll is bounded to 10 seconds. No process discovered independently of the
@@ -285,9 +293,9 @@ reported as the bounded identified target and no server is started.
   and the endpoint receipt.
 - Mneme worktree owns descriptor creation, replay generation, CLI/docs, golden
   vectors, and the synthetic five-row fixture.
-- Crucible worktree owns no new production behavior. Its commit-pinned replay
-  template/pack schema is the compatibility pin and its CLI produces the shared
-  template in the scratch run directory.
+- Crucible worktree owns the minimal fail-closed assessment-presence check plus
+  its CLI/docs/tests. Its replay template/pack schema remains the compatibility
+  pin and its CLI produces the shared template in the scratch run directory.
 - Workspace scratch owns the run-001 state input and the new run-002 export,
   registry, replay template, pack, result, endpoint profile, and receipts.
 - Crucible remains integration-test evidence only unless its existing pack
