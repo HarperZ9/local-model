@@ -771,6 +771,7 @@ raise SystemExit(exit_code)
 }
 if ($runError -or -not $cleanup.server_exited -or -not $cleanup.port_closed -or
     $phases.endpoint_gate -ne 'pass' -or $phases.qcr_task -notin @('PASS','FAIL')) { exit 1 }
+exit 0
 ```
 
 The `finally` block always executes. Bound the model stop to 15 seconds, normal
