@@ -6,8 +6,124 @@ Both verifiers must be able to fail:
 Plus: enterprise providers expose credential-presence booleans, never values.
 """
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
 
 from harness import gateway
+
+
+def test_gateway_remains_directly_runnable_in_source_mode():
+    root = Path(__file__).resolve().parents[1]
+    proc = subprocess.run(
+        [sys.executable, "harness/gateway.py", "--help"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "--instance-token" in proc.stdout
+
+
+def test_gateway_script_prefers_own_checkout_over_ambient_package(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    fake_package = tmp_path / "harness"
+    fake_package.mkdir()
+    (fake_package / "__init__.py").write_text("# incompatible ambient harness\n", encoding="utf-8")
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = os.pathsep.join((str(tmp_path), str(root)))
+
+    proc = subprocess.run(
+        [sys.executable, "harness/gateway.py", "--help"],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "--instance-token" in proc.stdout
+
+
+def test_runtime_handshake_returns_only_the_launch_identity():
+    expected = {
+        "protocol": "flywheel.gateway/1",
+        "version": "1.0.0",
+        "pid": os.getpid(),
+        "port": 54321,
+        "instance_token": "desktop-canary",
+    }
+    handler = gateway._Handler.__new__(gateway._Handler)
+    handler.path = "/api/runtime"
+    handler.server = SimpleNamespace(runtime_record=expected)
+    captured = {}
+    handler._json = lambda body, code=200: captured.update(body=body, code=code)
+
+    handler._get()
+
+    assert captured == {"body": expected, "code": 200}
+    assert set(captured["body"]) == {
+        "protocol", "version", "pid", "port", "instance_token"
+    }
+
+
+def test_port_zero_binds_loopback_and_emits_actual_port_once(monkeypatch, capsys):
+    captured = {}
+
+    class FakeServer:
+        server_address = ("127.0.0.1", 54321)
+
+        def __init__(self, address, handler):
+            captured["address"] = address
+            captured["handler"] = handler
+
+        def serve_forever(self):
+            captured["served"] = True
+
+        def server_close(self):
+            captured["closed"] = True
+
+    monkeypatch.setattr(gateway, "ThreadingHTTPServer", FakeServer)
+
+    assert gateway.main(["--port", "0", "--instance-token", "desktop-canary"]) == 0
+
+    json_lines = []
+    for line in capsys.readouterr().out.splitlines():
+        try:
+            json_lines.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass
+    assert captured["address"] == ("127.0.0.1", 0)
+    assert captured["served"] is True
+    assert captured["closed"] is True
+    assert json_lines == [{
+        "protocol": "flywheel.gateway/1",
+        "version": "1.0.0",
+        "pid": os.getpid(),
+        "port": 54321,
+        "instance_token": "desktop-canary",
+    }]
+
+
+def test_bind_failure_returns_nonzero_without_readiness(monkeypatch, capsys):
+    def occupied(*_args, **_kwargs):
+        raise OSError("address already in use")
+
+    monkeypatch.setattr(gateway, "ThreadingHTTPServer", occupied)
+    try:
+        result = gateway.main(["--port", "8799", "--instance-token", "desktop-canary"])
+    except OSError as exc:  # force a RED assertion instead of an uncaught test error
+        raise AssertionError("bind failure must return a nonzero exit status") from exc
+
+    assert result != 0
+    assert not any(
+        line.lstrip().startswith("{")
+        for line in capsys.readouterr().out.splitlines()
+    )
 
 
 def test_world_root_hash_changes_when_a_receipt_changes(tmp_path):
@@ -57,8 +173,6 @@ def test_spine_roster_present():
 
 
 # --- companion route: the two SUPERAPP increment-5 falsifiers ------------------
-
-from types import SimpleNamespace
 
 from harness.companion import CompanionSeat
 from harness.proposer import ProposerOutput

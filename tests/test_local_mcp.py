@@ -21,7 +21,11 @@ def _req(method, rid=1, params=None):
 
 
 def test_initialize_and_tools_list():
-    assert handle(_req("initialize"))["result"]["serverInfo"]["name"] == "local-agent"
+    import harness
+
+    server_info = handle(_req("initialize"))["result"]["serverInfo"]
+    assert server_info["name"] == "local-agent"
+    assert server_info["version"] == getattr(harness, "__version__", None) == "1.0.0"
     tools = {t["name"] for t in handle(_req("tools/list"))["result"]["tools"]}
     assert tools == {"local_agent_health", "local_agent_chat", "local_agent_run"}
 

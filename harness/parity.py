@@ -9,9 +9,9 @@ summary names both what is uniquely witnessed here and where the field is
 ahead -- the gap list is the point, not the scoreboard."""
 from __future__ import annotations
 
-from pathlib import Path
+from . import runtime_root
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = runtime_root()
 
 DECLARED_ON = "2026-07-13"
 
@@ -128,10 +128,37 @@ def _check_witness(kind: str, ref: str, gateway_src: str) -> bool:
     return False
 
 
+def runtime_witness_paths() -> tuple[str, ...]:
+    """Physical source witnesses required by the frozen parity endpoint."""
+    paths = {"harness/gateway.py"}
+    paths.update(
+        ref
+        for row in ROWS
+        for kind, ref in row["witnesses"]
+        if kind in {"module", "test"}
+    )
+    return tuple(sorted(paths))
+
+
 def parity_matrix() -> dict:
     """Audit every row's witnesses against this repo, right now."""
-    gateway_src = (REPO / "harness" / "gateway.py").read_text(
-        encoding="utf-8", errors="replace")
+    gateway_path = REPO / "harness" / "gateway.py"
+    try:
+        gateway_src = gateway_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {
+            "schema": "flywheel.parity/v1",
+            "declared_on": DECLARED_ON,
+            "availability": "unavailable",
+            "reason": "gateway-witness-absent",
+            "rows": [],
+            "summary": {
+                "witnessed": 0,
+                "absent": len(ROWS),
+                "uniquely_witnessed": [],
+                "gaps": [],
+            },
+        }
     rows = []
     witnessed = absent = 0
     unique = []
@@ -153,6 +180,7 @@ def parity_matrix() -> dict:
                      "checks": checks, "competitors": competitors})
     return {"schema": "flywheel.parity/v1",
             "declared_on": DECLARED_ON,
+            "availability": "available",
             "note": "flywheel cells are audited against this repo at read "
                     "time; competitor cells are dated declarations from "
                     "public docs and configs, not measurements",

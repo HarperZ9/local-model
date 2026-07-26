@@ -22,6 +22,8 @@ import runpy
 import sys
 from pathlib import Path
 
+from harness import __version__
+
 # The new umbrella subcommands. Handled in cli_entry; everything else is
 # delegated to the existing run_harness_cli front controller.
 _UMBRELLA_COMMANDS = {"lanes", "loop-status", "install", "up", "down", "corpus-export"}
@@ -121,7 +123,6 @@ def _cmd_up(argv: list[str]) -> int:
     the gateway starts. Then delegate to the existing `app` subcommand (which
     launches harness/gateway.py). The gateway serves /api/lanes, /api/world,
     and the shell on one origin."""
-    import sys as _sys
     # Preflight lane roster (fast, install-presence only, unless --probe).
     probe = "--probe" in argv
     from harness.lanes import lane_roster, lane_report
@@ -132,18 +133,9 @@ def _cmd_up(argv: list[str]) -> int:
     if not any(a == "--port" for a in gateway_argv):
         gateway_argv = ["--port", "8799"] + gateway_argv
     print("Starting the gateway ...")
-    _sys.stdout.flush()
-    # Re-invoke run_harness_cli.py with `app` + our port/flags.
-    repo_root = find_repo_root()
-    os.chdir(repo_root)
-    import runpy
-    script = repo_root / "scripts" / "run_harness_cli.py"
-    _sys.argv = [str(script), "app", *gateway_argv]
-    try:
-        runpy.run_path(str(script), run_name="__main__")
-    except SystemExit as exc:
-        return int(exc.code or 0)
-    return 0
+    sys.stdout.flush()
+    from harness.gateway import main as gateway_main
+    return gateway_main(gateway_argv)
 
 
 def _dispatch_umbrella(command: str, argv: list[str]) -> int:
@@ -190,6 +182,9 @@ def _dispatch_umbrella(command: str, argv: list[str]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     raw = list(argv if argv is not None else sys.argv[1:])
+    if raw in (["--version"], ["-V"]):
+        print(__version__)
+        return 0
     # Peek at the first positional to decide umbrella-vs-passthrough. The
     # existing run_harness_cli parser requires a subcommand, so the first
     # non-flag token is the command name.

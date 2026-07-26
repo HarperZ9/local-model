@@ -28,10 +28,13 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
+from . import __version__, runtime_root
+
+REPO = runtime_root()
 TELOS_MANIFEST = REPO.parent / "public" / "telos" / "demo" / "integrations" / "mcp-server-manifest.json"
 
 # Where the lane registry (installed versions + profiles) is recorded.
@@ -102,7 +105,7 @@ LANES: dict[str, Lane] = {
         "the reconciliation lane: five-tool workflow + creative engine + doctors",
         "reconciliation", source_repo="public/telos"),
     "local-model": Lane(
-        "local-model", "", "python", ("-m", "harness.local_mcp"), "bundled", "0.1.0",
+        "local-model", "", "python", ("-m", "harness.local_mcp"), "bundled", __version__,
         "the trained 14B proposer + verified-inference harness (the engine lane)",
         "propose-verify"),
 }
@@ -173,6 +176,30 @@ def lane_status(name: str, *, probe: bool = True, timeout: float = 20.0) -> dict
     lane = LANES.get(name)
     if lane is None:
         return {"name": name, "status": MISSING, "detail": "unknown lane"}
+    if getattr(sys, "frozen", False):
+        if lane.kind == "bundled":
+            return {
+                "name": name,
+                "kind": lane.kind,
+                "installed_version": lane.version,
+                "expected_version": lane.version,
+                "status": LIVE,
+                "availability": "available",
+                "organ": lane.organ,
+                "role": lane.role,
+                "detail": "bundled in Desktop engine (external probe skipped)",
+            }
+        return {
+            "name": name,
+            "kind": lane.kind,
+            "installed_version": None,
+            "expected_version": lane.version,
+            "status": MISSING,
+            "availability": "unavailable",
+            "organ": lane.organ,
+            "role": lane.role,
+            "detail": "external lane discovery unavailable in Desktop engine",
+        }
     installed = _installed_version(lane)
     if installed is None and lane.kind != "bundled":
         # Check the source checkout as a fallback (declared but not packaged).

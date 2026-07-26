@@ -3,17 +3,323 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
+import platform
+import shutil
 import subprocess
 import sys
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parent.parent
+if not sys.path or sys.path[0] != str(ROOT):
+    sys.path.insert(0, str(ROOT))
+
+from harness import __version__  # noqa: E402
+from harness.gateway import GATEWAY_PROTOCOL  # noqa: E402
+from harness.parity import runtime_witness_paths  # noqa: E402
+
 DIST = ROOT / "artifacts" / "exe"
 WORK = ROOT / "artifacts" / ".pyinstaller"
 DEFAULT_SERVE_PYTHON = "E:/local-model-run/venv/Scripts/python.exe"
 DEFAULT_TOOLS = "index,forum,gather,crucible,telos,aleph,mneme,relay,plexus,pubscan,local-model"
+DESKTOP_ENGINE_PYTHON_VERSION = "3.12.10"
+DESKTOP_ENGINE_PYINSTALLER_VERSION = "6.21.0"
+DESKTOP_ENGINE_CANDIDATE = ROOT / "artifacts" / "desktop-engine-candidate"
+
+# The Desktop checkout is a separate repository, so its location is a property
+# of the machine, not of this source tree. Pinning one worktree name made the
+# engine suite fail for anyone not standing in that exact pair of directories.
+DESKTOP_MANIFEST_ENV = "FLYWHEEL_DESKTOP_MANIFEST"
+DESKTOP_ROOT_ENV = "FLYWHEEL_DESKTOP_ROOT"
+DESKTOP_CHECKOUT_NAMES = (
+    "flywheel-desktop-v1-rc",
+    "flywheel-desktop",
+)
+_MANIFEST_RELPATH = Path("packaging") / "release-manifest.json"
+
+
+def desktop_manifest_candidates() -> list[Path]:
+    """Every path that could hold the Desktop release manifest, in order."""
+    explicit = os.environ.get(DESKTOP_MANIFEST_ENV)
+    if explicit:
+        return [Path(explicit).expanduser()]
+    roots: list[Path] = []
+    configured = os.environ.get(DESKTOP_ROOT_ENV)
+    if configured:
+        roots.append(Path(configured).expanduser())
+    roots.extend(ROOT.parent / name for name in DESKTOP_CHECKOUT_NAMES)
+    roots.append(ROOT.parent.parent / "flywheel-desktop")
+    return [root / _MANIFEST_RELPATH for root in roots]
+
+
+def find_desktop_release_manifest() -> Path | None:
+    """Resolve the Desktop manifest, or None when no checkout is present.
+
+    Returning None lets callers skip rather than fail: an engine-only checkout
+    is a legitimate state, and a missing sibling repository is not a defect in
+    the engine.
+    """
+    for candidate in desktop_manifest_candidates():
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def require_desktop_release_manifest() -> Path:
+    """Resolve the Desktop manifest or fail with the paths that were tried."""
+    found = find_desktop_release_manifest()
+    if found is not None:
+        return found
+    tried = "\n  ".join(str(p) for p in desktop_manifest_candidates())
+    raise FileNotFoundError(
+        f"Desktop release manifest not found. Set ${DESKTOP_MANIFEST_ENV} or "
+        f"${DESKTOP_ROOT_ENV}. Tried:\n  {tried}"
+    )
+DESKTOP_ENGINE_RUNTIME_SOURCES = (
+    "harness/compaction.py",
+    "harness/consensus.py",
+    "harness/endpoint_registry.py",
+    "harness/envelope.py",
+    "harness/fold_index.py",
+    "harness/gateway.py",
+    "harness/integrity.py",
+    "harness/keychain.py",
+    "harness/linter.py",
+    "harness/local_mcp.py",
+    "harness/loop_closure.py",
+    "harness/lsp_bridge.py",
+    "harness/lsp_diagnostics.py",
+    "harness/marketplace.py",
+    "harness/mcp_client.py",
+    "harness/memory_api.py",
+    "harness/plugins.py",
+    "harness/profiles.py",
+    "harness/router_stats.py",
+    "harness/workflows.py",
+    "harness/world.py",
+    "site/assets/fonts/conso-medium.woff2",
+    "site/assets/fonts/conso-regular.woff2",
+    "site/assets/fonts/conso-semibold.woff2",
+    "site/assets/fonts/hanken-grotesk-italic.woff2",
+    "site/assets/fonts/hanken-grotesk.woff2",
+    "site/index.html",
+    "tests/test_keychain.py",
+    "tests/test_linter.py",
+    "tests/test_lsp_bridge.py",
+    "tests/test_lsp_diagnostics.py",
+    "tests/test_marketplace.py",
+    "tests/test_memory_api.py",
+    "tests/test_plugins.py",
+    "tests/test_profiles_workflows.py",
+    "tests/test_workspace_root.py",
+)
+DESKTOP_ENGINE_RUNTIME_SOURCE_COUNT = 36
+DESKTOP_ENGINE_CANDIDATE_FILE_COUNT = 38
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def desktop_engine_runtime_sources(source_root: Path = ROOT) -> tuple[str, ...]:
+    """Exact physical data allowlist for the frozen Desktop engine."""
+    source_root = Path(source_root)
+    sources = DESKTOP_ENGINE_RUNTIME_SOURCES
+    if len(sources) != DESKTOP_ENGINE_RUNTIME_SOURCE_COUNT:
+        raise RuntimeError("Desktop engine runtime source-count contract drifted")
+    expected_witnesses = tuple(path for path in sources if not path.startswith("site/"))
+    if runtime_witness_paths() != expected_witnesses:
+        raise RuntimeError("Desktop engine parity-witness inventory drifted")
+    missing = [path for path in sources if not (source_root / path).is_file()]
+    if missing:
+        raise FileNotFoundError(f"Desktop engine runtime source missing: {missing[0]}")
+    return sources
+
+
+def validate_desktop_runtime_source_tracking(
+    source_paths: tuple[str, ...],
+    tracked_paths: tuple[str, ...],
+) -> None:
+    """Fail closed if an allowlisted runtime source is not tracked by Git."""
+    missing = sorted(set(source_paths) - set(tracked_paths))
+    if missing:
+        raise RuntimeError(f"Desktop engine runtime source is not tracked: {missing[0]}")
+
+
+def _desktop_manifest(manifest_path: Path) -> dict:
+    manifest_path = Path(manifest_path)
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Desktop release manifest missing: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    expected = {
+        "schema_version": 1,
+        "version": __version__,
+        "protocol": GATEWAY_PROTOCOL,
+        "python": DESKTOP_ENGINE_PYTHON_VERSION,
+        "pyinstaller": DESKTOP_ENGINE_PYINSTALLER_VERSION,
+        "executable": "engine/bin/flywheel.exe",
+        "runtime_root": "engine/runtime",
+    }
+    observed = {
+        "schema_version": manifest.get("schema_version"),
+        "version": manifest.get("product", {}).get("version"),
+        "protocol": manifest.get("gateway", {}).get("protocol"),
+        "python": manifest.get("toolchain", {}).get("python"),
+        "pyinstaller": manifest.get("toolchain", {}).get("pyinstaller"),
+        "executable": manifest.get("engine_layout", {}).get("executable"),
+        "runtime_root": manifest.get("engine_layout", {}).get("runtime_root"),
+    }
+    if observed != expected:
+        raise RuntimeError("Desktop release manifest diverges from the engine contract")
+    policy = manifest.get("payload_policy", {})
+    if policy.get("default") != "reject" or policy.get("path_mode") != "literal-posix":
+        raise RuntimeError("Desktop release manifest payload policy is not default-deny")
+    return manifest
+
+
+def _desktop_path_allowed(path: str, policy: dict) -> bool:
+    if not path or "\\" in path:
+        return False
+    pure = PurePosixPath(path)
+    if pure.is_absolute() or path != "/".join(pure.parts) or ".." in pure.parts:
+        return False
+    lowered_parts = tuple(part.lower() for part in pure.parts)
+    lowered_name = lowered_parts[-1]
+    permitted = False
+    for root in policy.get("permitted_roots", ()):
+        root_path = PurePosixPath(root.get("path", ""))
+        if root.get("kind") == "file" and pure == root_path:
+            permitted = True
+        if (
+            root.get("kind") == "tree"
+            and pure.parts[:len(root_path.parts)] == root_path.parts
+        ):
+            permitted = True
+    if not permitted:
+        return False
+    forbidden = policy.get("forbidden", {})
+    if any(
+        lowered_name.startswith(value.lower())
+        for value in forbidden.get("name_prefixes", ())
+    ):
+        return False
+    if any(
+        value.lower() in lowered_name
+        for value in forbidden.get("name_fragments", ())
+    ):
+        return False
+    if lowered_name in {value.lower() for value in forbidden.get("names", ())}:
+        return False
+    forbidden_segments = {
+        value.lower() for value in forbidden.get("segments", ())
+    }
+    if any(part in forbidden_segments for part in lowered_parts):
+        return False
+    if any(
+        lowered_name.endswith(value.lower())
+        for value in forbidden.get("suffixes", ())
+    ):
+        return False
+    lowered_path = "/".join(lowered_parts)
+    return not any(
+        lowered_path == value.lower() or lowered_path.endswith("/" + value.lower())
+        for value in forbidden.get("subpaths", ())
+    )
+
+
+def validate_desktop_candidate_paths(
+    paths: tuple[str, ...] | set[str],
+    *,
+    manifest_path: Path | None = None,
+) -> dict:
+    """Apply the Desktop-owned default-deny payload policy to engine paths."""
+    manifest = _desktop_manifest(
+        manifest_path if manifest_path is not None
+        else require_desktop_release_manifest()
+    )
+    policy = manifest["payload_policy"]
+    rejected = sorted(path for path in paths if not _desktop_path_allowed(path, policy))
+    if rejected:
+        raise RuntimeError(f"Desktop payload policy rejected candidate path: {rejected[0]}")
+    return manifest
+
+
+def stage_desktop_engine_runtime(
+    runtime_root: Path,
+    *,
+    source_root: Path = ROOT,
+    source_commit: str,
+) -> Path:
+    """Copy only allowlisted runtime data and write its deterministic manifest."""
+    runtime_root = Path(runtime_root)
+    source_root = Path(source_root)
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    if any(runtime_root.iterdir()):
+        raise FileExistsError(f"Desktop engine runtime root is not empty: {runtime_root}")
+
+    rows = []
+    for rel in desktop_engine_runtime_sources(source_root):
+        source = source_root / rel
+        destination = runtime_root / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        rows.append({
+            "path": rel,
+            "bytes": destination.stat().st_size,
+            "sha256": _sha256(destination),
+            "role": "site" if rel.startswith("site/") else "parity-witness",
+        })
+
+    manifest = {
+        "schema": "flywheel.engine-runtime-manifest/1",
+        "version": __version__,
+        "protocol": GATEWAY_PROTOCOL,
+        "source_commit": source_commit,
+        "files": rows,
+    }
+    manifest_path = runtime_root / "runtime-manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    return manifest_path
+
+
+def desktop_engine_pyinstaller_command(
+    python: str,
+    *,
+    dist_path: Path,
+    work_path: Path,
+    spec_path: Path,
+) -> list[str]:
+    """Tracked, spec-free PyInstaller invocation for ``flywheel.exe``."""
+    return [
+        python,
+        "-m",
+        "PyInstaller",
+        "--onefile",
+        "--noconfirm",
+        "--clean",
+        "--distpath",
+        str(dist_path),
+        "--workpath",
+        str(work_path),
+        "--specpath",
+        str(spec_path),
+        "--name",
+        "flywheel",
+        "--hidden-import",
+        "harness.gateway",
+        "--hidden-import",
+        "harness.lanes",
+        "--hidden-import",
+        "harness.parity",
+        str(ROOT / "scripts" / "flywheel_entry.py"),
+    ]
 
 
 def _build(name: str, entry: str, *, python: str, hidden: list[str] | None = None) -> None:
@@ -71,6 +377,273 @@ def _has_pyinstaller(python: str) -> bool:
         print(proc.stderr.strip())
         return False
     return True
+
+
+def _python_probe(python: str, code: str, label: str) -> str:
+    proc = subprocess.run(
+        [python, "-c", code],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"unable to identify {label}: {proc.stderr.strip()}")
+    return proc.stdout.strip()
+
+
+def _git_value(*args: str) -> str:
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
+    return proc.stdout.strip()
+
+
+def _git_file_at_head_sha256(path: str) -> str:
+    proc = subprocess.run(
+        ["git", "show", f"HEAD:{path}"],
+        cwd=ROOT,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"git show HEAD:{path} failed: {proc.stderr.decode(errors='replace').strip()}"
+        )
+    return hashlib.sha256(proc.stdout).hexdigest()
+
+
+def _git_path_matches_head(path: str) -> bool:
+    """Use Git's clean/smudge filters when comparing a worktree file to HEAD."""
+    proc = subprocess.run(
+        ["git", "diff", "--quiet", "HEAD", "--", path],
+        cwd=ROOT,
+    )
+    if proc.returncode not in {0, 1}:
+        raise RuntimeError(f"git diff failed while checking runtime source: {path}")
+    return proc.returncode == 0
+
+
+def _desktop_source_status() -> tuple[str, ...]:
+    """Return source dirt while excluding only known generated engine outputs."""
+    value = _git_value(
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--",
+        ".",
+        ":(exclude)artifacts/.pyinstaller/**",
+        ":(exclude)artifacts/desktop-engine-candidate/**",
+        ":(exclude)artifacts/desktop-engine-candidate-build-receipt.json",
+        ":(exclude)artifacts/desktop-engine-focused-tests-receipt.json",
+    )
+    return tuple(line for line in value.splitlines() if line)
+
+
+def _runtime_source_provenance(paths: tuple[str, ...]) -> list[dict]:
+    rows = []
+    for relative in paths:
+        working_sha256 = _sha256(ROOT / relative)
+        head_sha256 = _git_file_at_head_sha256(relative)
+        rows.append({
+            "path": relative,
+            "working_file_sha256": working_sha256,
+            "head_blob_sha256": head_sha256,
+            "matches_head": _git_path_matches_head(relative),
+        })
+    return rows
+
+
+def _candidate_file_rows(candidate_root: Path) -> list[dict]:
+    rows = []
+    for path in sorted(p for p in candidate_root.rglob("*") if p.is_file()):
+        rows.append({
+            "path": path.relative_to(candidate_root).as_posix(),
+            "bytes": path.stat().st_size,
+            "sha256": _sha256(path),
+        })
+    return rows
+
+
+def _replace_candidate(staged: Path, output: Path) -> None:
+    output = output.resolve()
+    default = DESKTOP_ENGINE_CANDIDATE.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.exists():
+        if output == default:
+            shutil.rmtree(output)
+        elif output.is_dir() and not any(output.iterdir()):
+            output.rmdir()
+        else:
+            raise FileExistsError(f"Desktop engine output must be empty: {output}")
+    shutil.move(str(staged), str(output))
+
+
+def desktop_engine_receipt_path(output: Path, receipt_path: Path | None) -> Path:
+    """Resolve the sole receipt location, adjacent to and outside the candidate."""
+    output = Path(output).resolve()
+    canonical = (output.parent / f"{output.name}-build-receipt.json").resolve()
+    if receipt_path is not None and Path(receipt_path).resolve() != canonical:
+        raise ValueError(
+            f"Desktop engine receipt must use canonical adjacent path: {canonical}"
+        )
+    return canonical
+
+
+def build_desktop_engine(
+    *,
+    python: str,
+    output: Path,
+    receipt_path: Path | None = None,
+) -> tuple[Path, Path]:
+    """Build and stage the canonical standalone Desktop engine candidate."""
+    python = str(Path(python).resolve())
+    output = Path(output).resolve()
+    # Resolve once and reuse: the existing sha256 re-check below still catches a
+    # manifest edited mid-build, and pinning the path keeps a checkout that
+    # appears or moves during the freeze from silently switching manifests.
+    desktop_release_manifest = require_desktop_release_manifest()
+    receipt_path = desktop_engine_receipt_path(output, receipt_path)
+    observed_python = _python_probe(
+        python,
+        "import platform; print(platform.python_version())",
+        "Python version",
+    )
+    observed_pyinstaller = _python_probe(
+        python,
+        "import PyInstaller; print(PyInstaller.__version__)",
+        "PyInstaller version",
+    )
+    if observed_python != DESKTOP_ENGINE_PYTHON_VERSION:
+        raise RuntimeError(
+            f"Desktop engine requires Python {DESKTOP_ENGINE_PYTHON_VERSION}; "
+            f"observed {observed_python}"
+        )
+    if observed_pyinstaller != DESKTOP_ENGINE_PYINSTALLER_VERSION:
+        raise RuntimeError(
+            f"Desktop engine requires PyInstaller {DESKTOP_ENGINE_PYINSTALLER_VERSION}; "
+            f"observed {observed_pyinstaller}"
+        )
+
+    source_commit = _git_value("rev-parse", "HEAD")
+    source_epoch = _git_value("show", "-s", "--format=%ct", "HEAD")
+    source_status = _desktop_source_status()
+    runtime_sources = desktop_engine_runtime_sources(ROOT)
+    tracked_sources = tuple(
+        line for line in _git_value("ls-files", "--", *runtime_sources).splitlines() if line
+    )
+    validate_desktop_runtime_source_tracking(runtime_sources, tracked_sources)
+    runtime_source_provenance = _runtime_source_provenance(runtime_sources)
+    expected = {
+        "engine/bin/flywheel.exe",
+        "engine/runtime/runtime-manifest.json",
+        *(f"engine/runtime/{path}" for path in runtime_sources),
+    }
+    if len(expected) != DESKTOP_ENGINE_CANDIDATE_FILE_COUNT:
+        raise RuntimeError("Desktop engine candidate file-count contract drifted")
+    desktop_manifest = validate_desktop_candidate_paths(
+        expected,
+        manifest_path=desktop_release_manifest,
+    )
+    desktop_manifest_sha256 = _sha256(desktop_release_manifest)
+
+    desktop_work = WORK / "desktop-engine"
+    if desktop_work.exists():
+        shutil.rmtree(desktop_work)
+    dist_path = desktop_work / "dist"
+    work_path = desktop_work / "work"
+    spec_path = desktop_work / "generated-spec"
+    staged = desktop_work / "candidate"
+    for path in (dist_path, work_path, spec_path, staged / "engine" / "bin"):
+        path.mkdir(parents=True, exist_ok=True)
+
+    command = desktop_engine_pyinstaller_command(
+        python,
+        dist_path=dist_path,
+        work_path=work_path,
+        spec_path=spec_path,
+    )
+    environment = dict(os.environ)
+    environment["PYTHONHASHSEED"] = "0"
+    environment["SOURCE_DATE_EPOCH"] = source_epoch
+    print(f"[desktop-engine] {' '.join(command)}")
+    proc = subprocess.run(command, cwd=ROOT, env=environment)
+    if proc.returncode != 0:
+        raise RuntimeError(f"Desktop engine PyInstaller build failed ({proc.returncode})")
+
+    built_executable = dist_path / "flywheel.exe"
+    if not built_executable.is_file():
+        raise FileNotFoundError(f"PyInstaller did not produce {built_executable}")
+    staged_executable = staged / "engine" / "bin" / "flywheel.exe"
+    shutil.copyfile(built_executable, staged_executable)
+    staged_manifest = stage_desktop_engine_runtime(
+        staged / "engine" / "runtime",
+        source_root=ROOT,
+        source_commit=source_commit,
+    )
+
+    observed = {row["path"] for row in _candidate_file_rows(staged)}
+    if observed != expected:
+        raise RuntimeError(
+            "Desktop engine candidate path set diverged from the runtime allowlist"
+        )
+    validate_desktop_candidate_paths(
+        observed,
+        manifest_path=desktop_release_manifest,
+    )
+    if _sha256(desktop_release_manifest) != desktop_manifest_sha256:
+        raise RuntimeError("Desktop release manifest changed during the engine build")
+
+    _replace_candidate(staged, output)
+    manifest_path = output / "engine" / "runtime" / staged_manifest.name
+    receipt = {
+        "schema": "flywheel.engine-build-receipt/1",
+        "version": __version__,
+        "protocol": GATEWAY_PROTOCOL,
+        "builder": "scripts/build_local_harness_exes.py:--desktop-engine",
+        "source": {
+            "commit": source_commit,
+            "dirty": bool(source_status),
+            "status": list(source_status),
+            "runtime_files": runtime_source_provenance,
+        },
+        "desktop_release_manifest": {
+            "path": str(desktop_release_manifest.resolve()),
+            "sha256": desktop_manifest_sha256,
+            "schema_version": desktop_manifest["schema_version"],
+            "manifest_state": desktop_manifest["manifest_state"],
+        },
+        "toolchain": {
+            "python_required": DESKTOP_ENGINE_PYTHON_VERSION,
+            "python_observed": observed_python,
+            "python_implementation": platform.python_implementation(),
+            "python_executable_sha256": _sha256(Path(python)),
+            "pyinstaller_required": DESKTOP_ENGINE_PYINSTALLER_VERSION,
+            "pyinstaller_observed": observed_pyinstaller,
+            "platform": platform.platform(),
+        },
+        "determinism": {
+            "PYTHONHASHSEED": "0",
+            "SOURCE_DATE_EPOCH": source_epoch,
+        },
+        "command": command,
+        "candidate_root": str(output),
+        "files": _candidate_file_rows(output),
+        "executable_sha256": _sha256(output / "engine" / "bin" / "flywheel.exe"),
+        "runtime_manifest_sha256": _sha256(manifest_path),
+    }
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text(
+        json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    print(f"[ok] Desktop engine candidate {output}")
+    print(f"[ok] Desktop engine build receipt {receipt_path}")
+    return output, receipt_path
 
 
 def _write_cmd_wrapper(name: str) -> Path:
@@ -600,8 +1173,14 @@ def _write_release_manifest(args: argparse.Namespace, *, profiles_path: Path, bu
     return path
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--desktop-engine", action="store_true",
+                    help="build only the standalone Desktop engine candidate")
+    ap.add_argument("--desktop-engine-output", default=str(DESKTOP_ENGINE_CANDIDATE),
+                    help="empty/default-replaceable root receiving engine/bin and engine/runtime")
+    ap.add_argument("--desktop-engine-receipt",
+                    help="build-command receipt path (defaults beside the candidate)")
     ap.add_argument("--skip-harness", action="store_true",
                     help="skip the full local-harness executable")
     ap.add_argument("--skip-agent", action="store_true",
@@ -651,7 +1230,16 @@ def main() -> int:
     ap.add_argument("--package", action="store_true",
                     help="assemble a local release bundle after building")
     ap.add_argument("--package-version", default=datetime.now(UTC).strftime("%Y%m%d-%H%M%S"))
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+
+    if args.desktop_engine:
+        build_desktop_engine(
+            python=sys.executable,
+            output=Path(args.desktop_engine_output),
+            receipt_path=(Path(args.desktop_engine_receipt)
+                          if args.desktop_engine_receipt else None),
+        )
+        return 0
 
     DIST.mkdir(parents=True, exist_ok=True)
     WORK.mkdir(parents=True, exist_ok=True)

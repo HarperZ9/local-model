@@ -57,3 +57,10 @@ artifacts/exe/
 # One line naming this machine's training/run root (e.g. E:/local-model-run).
 # Read by harness/run_paths.py; never shipped, so the source stays path-clean.
 .flywheel-run-root
+
+# --- Desktop engine freeze output (a ~29 MB PE, rebuilt by the release lane) ---
+# Staged for the Desktop RC bundle, never source. The build receipt beside it
+# records source.dirty and a gateway hash, so it goes stale the moment the
+# engine is edited; regenerate it, do not preserve it.
+artifacts/desktop-engine-candidate/
+artifacts/desktop-engine-candidate-build-receipt.json

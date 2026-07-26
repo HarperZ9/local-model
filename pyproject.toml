@@ -16,13 +16,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flywheel"
-version = "0.1.0"
+dynamic = ["version"]
 description = "The one platform: routing, verification, the lane layer, memory/context/catalog, and the closed verified-inference loop."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "FSL-1.1-MIT" }
 authors = [{ name = "Zain" }]
 dependencies = []
+
+[project.optional-dependencies]
+desktop-engine-build = ["pyinstaller==6.21.0"]
 
 [project.scripts]
 # The single surface command. Dispatches to the existing run_harness_cli
@@ -32,6 +35,9 @@ flywheel = "harness.cli_entry:main"
 [tool.setuptools]
 # Explicit package + data discovery. Keep py_modules minimal.
 py-modules = []
+
+[tool.setuptools.dynamic]
+version = { attr = "harness.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["harness*"]

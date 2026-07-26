@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import tomllib
+
 from scripts.run_harness_cli import (
     build_command,
     build_manifest,
@@ -9,6 +11,80 @@ from scripts.run_harness_cli import (
     render_manifest_markdown,
     render_registry_html,
 )
+
+
+def test_flywheel_up_dispatches_gateway_without_checkout_or_runpy(monkeypatch):
+    import harness.cli_entry as cli_entry
+    import harness.gateway as gateway
+    import harness.lanes as lanes
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("flywheel up must not discover or execute a source checkout")
+
+    captured = {}
+    monkeypatch.setattr(cli_entry, "find_repo_root", forbidden)
+    monkeypatch.setattr(cli_entry.runpy, "run_path", forbidden)
+    monkeypatch.setattr(lanes, "lane_roster", lambda *, probe=False: {"probe": probe})
+    monkeypatch.setattr(lanes, "lane_report", lambda roster: f"roster={roster}")
+    monkeypatch.setattr(
+        gateway,
+        "main",
+        lambda argv: captured.setdefault("argv", list(argv)) and 17,
+    )
+
+    gateway_args = [
+        "--port", "0",
+        "--root", "C:/runtime",
+        "--serve-url", "http://127.0.0.1:8765",
+        "--ollama-url", "http://127.0.0.1:11434",
+        "--run-root", "C:/run",
+        "--cors",
+        "--instance-token", "desktop-canary",
+    ]
+    assert cli_entry.main(["up", "--probe", *gateway_args]) == 17
+    assert captured["argv"] == gateway_args
+
+
+def test_flywheel_up_supplies_default_port_to_direct_gateway(monkeypatch):
+    import harness.cli_entry as cli_entry
+    import harness.gateway as gateway
+    import harness.lanes as lanes
+
+    captured = {}
+    monkeypatch.setattr(lanes, "lane_roster", lambda *, probe=False: {})
+    monkeypatch.setattr(lanes, "lane_report", lambda _roster: "roster")
+    def fake_gateway(argv):
+        captured["argv"] = list(argv)
+        return 0
+    monkeypatch.setattr(gateway, "main", fake_gateway)
+
+    assert cli_entry.main(["up", "--instance-token", "token"]) == 0
+    assert captured["argv"] == ["--port", "8799", "--instance-token", "token"]
+
+
+def test_engine_version_has_one_package_source_and_dynamic_metadata():
+    import harness
+    import harness.cli_entry as cli_entry
+    import harness.local_mcp as local_mcp
+    from harness.lanes import LANES
+
+    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    package_version = getattr(harness, "__version__", None)
+
+    assert package_version == "1.0.0"
+    assert project["project"].get("version") is None
+    assert project["project"].get("dynamic") == ["version"]
+    assert project["tool"]["setuptools"]["dynamic"]["version"] == {
+        "attr": "harness.__version__"
+    }
+    assert project["project"]["optional-dependencies"]["desktop-engine-build"] == [
+        "pyinstaller==6.21.0"
+    ]
+    assert getattr(cli_entry, "__version__", None) == package_version
+    import harness.gateway as gateway
+    assert gateway.__version__ == package_version
+    assert local_mcp.__version__ == package_version
+    assert LANES["local-model"].version == package_version
 
 
 def test_dispatcher_inserts_repo_root_before_harness_import():

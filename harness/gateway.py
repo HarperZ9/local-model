@@ -37,14 +37,29 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
+_PACKAGE_ROOT = Path(__file__).resolve().parent.parent
+if not sys.path or sys.path[0] != str(_PACKAGE_ROOT):
+    sys.path.insert(0, str(_PACKAGE_ROOT))
+from harness import __version__, runtime_root  # noqa: E402
+
+
+GATEWAY_PROTOCOL = "flywheel.gateway/1"
+REPO = runtime_root()
 # Ensure `from harness.X import ...` resolves even when run as `python
 # harness/gateway.py` (script mode puts harness/ on the path, not the repo root),
 # so the on-demand endpoint_registry / context_forge imports work in both modes.
-if str(REPO) not in sys.path:
-    sys.path.insert(0, str(REPO))
+from harness.run_paths import run_root_default  # noqa: E402
 
-from harness.run_paths import run_root_default
+
+def runtime_record(port: int, instance_token: str) -> dict:
+    """Stable Desktop ownership handshake and readiness payload."""
+    return {
+        "protocol": GATEWAY_PROTOCOL,
+        "version": __version__,
+        "pid": os.getpid(),
+        "port": int(port),
+        "instance_token": instance_token,
+    }
 
 
 def _resolve_credential(key_env: str) -> str:
@@ -273,6 +288,13 @@ def _projected_world(root: Path) -> dict:
 def _training_status(run_root: str) -> dict:
     """Read-only 32B supervisor status (training_lane): log-derived state +
     screen liveness + checkpoint progress. Graceful if the module is unavailable."""
+    if getattr(sys, "frozen", False):
+        return {
+            "schema": "flywheel.runtime-availability/1",
+            "feature": "training-status",
+            "availability": "unavailable",
+            "reason": "not-in-desktop-engine",
+        }
     try:
         from harness.training_lane import training_status
     except Exception:
@@ -1020,6 +1042,8 @@ class _Handler(BaseHTTPRequestHandler):
     def _get(self):
         p = self.path.split("?", 1)[0]
         qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+        if p == "/api/runtime":
+            return self._json(self.server.runtime_record)
         if p == "/api/endpoints/health":
             return self._json(endpoint_roster(self.serve_url, self.ollama_url))
         if p == "/api/endpoints":
@@ -2359,6 +2383,8 @@ def main(argv=None) -> int:
     ap.add_argument("--serve-url", default="http://127.0.0.1:8765")
     ap.add_argument("--ollama-url", default="http://127.0.0.1:11434")
     ap.add_argument("--run-root", default=run_root_default())
+    ap.add_argument("--instance-token", default="",
+                    help="caller-generated process ownership token echoed by /api/runtime")
     ap.add_argument("--cors", action="store_true",
                     help="allow cross-origin browser clients (off by default; the gateway is local)")
     a = ap.parse_args(argv)
@@ -2367,23 +2393,32 @@ def main(argv=None) -> int:
     _Handler.ollama_url = a.ollama_url
     _Handler.run_root = a.run_root
     _Handler.cors = a.cors
-    httpd = ThreadingHTTPServer(("127.0.0.1", a.port), _Handler)
-    print(f"flywheel gateway: http://127.0.0.1:{a.port}  root={_Handler.root}")
-    print(f"  shell     http://127.0.0.1:{a.port}/site/index.html")
-    print(f"  world     http://127.0.0.1:{a.port}/api/world")
-    print(f"  health    http://127.0.0.1:{a.port}/api/endpoints/health")
-    print(f"  router    http://127.0.0.1:{a.port}/api/endpoints    (all providers)")
+    try:
+        httpd = ThreadingHTTPServer(("127.0.0.1", a.port), _Handler)
+    except OSError as exc:
+        print(f"flywheel gateway bind failed on 127.0.0.1:{a.port}: {exc}", file=sys.stderr)
+        return 1
+    bound_port = int(httpd.server_address[1])
+    httpd.runtime_record = runtime_record(bound_port, a.instance_token)
+    print(json.dumps(httpd.runtime_record, separators=(",", ":")), flush=True)
+    print(f"flywheel gateway: http://127.0.0.1:{bound_port}  root={_Handler.root}")
+    print(f"  shell     http://127.0.0.1:{bound_port}/site/index.html")
+    print(f"  world     http://127.0.0.1:{bound_port}/api/world")
+    print(f"  health    http://127.0.0.1:{bound_port}/api/endpoints/health")
+    print(f"  router    http://127.0.0.1:{bound_port}/api/endpoints    (all providers)")
     print(f"  studio    POST /api/forge {{'goal': ...}}            (goal -> verified PRP)")
     print(f"  route     POST /api/route {{'prompt':...,'endpoint':...}} (any provider + a receipt)")
     print(f"  companion POST /api/companion {{'prompt': ...}}      (answer local, escalate hard)")
     print(f"  agent     POST /api/agent {{'goal':...,'endpoint':...}} (gated tool loop over ANY provider, witnessed)")
-    print(f"  training  http://127.0.0.1:{a.port}/api/training/status  (read-only supervisor status)")
-    print(f"  stats     http://127.0.0.1:{a.port}/api/router/stats  (adaptive-routing scoreboard)")
+    print(f"  training  http://127.0.0.1:{bound_port}/api/training/status  (read-only supervisor status)")
+    print(f"  stats     http://127.0.0.1:{bound_port}/api/router/stats  (adaptive-routing scoreboard)")
     print(f"  openai    POST /v1/chat/completions  +  GET /v1/models  (drop-in, model=any provider, stream ok)")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        httpd.server_close()
     return 0
 
 
