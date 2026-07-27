@@ -99,24 +99,49 @@ def endpoint_roster(serve_url: str, ollama_url: str) -> dict:
 
     enterprise = []
     try:
-        from harness.endpoints import PROVIDERS
+        from harness.endpoints import PROVIDERS, _resolve_cli_command
     except Exception:
         try:
-            from endpoints import PROVIDERS  # standalone run
+            from endpoints import PROVIDERS, _resolve_cli_command  # standalone run
         except Exception:
-            PROVIDERS = {}
+            PROVIDERS, _resolve_cli_command = {}, None
+
+    def _subscription_cli(name, spec):
+        """Official-CLI subscription availability (binary on PATH). PRESENCE only,
+        never a token: the operator's own claude/codex client holds its own auth
+        and is invoked directly; nothing is proxied, replayed, or metered around."""
+        import shutil as _sh
+        if _resolve_cli_command is None:
+            return "", False
+        try:
+            argv = _resolve_cli_command(spec, name)
+        except Exception:
+            argv = None
+        if not argv:
+            return "", False
+        return argv[0], _sh.which(argv[0]) is not None
+
     for name, spec in PROVIDERS.items():
         key_env = spec.get("key", "")
+        api_present = bool(key_env and _resolve_credential(key_env))
+        cli_bin, sub_present = _subscription_cli(name, spec)
+        # subscription-first: the paid-for CLI is the primary tier, API the fallback
+        access = "subscription" if sub_present else ("api" if api_present else "none")
         enterprise.append({
             "name": name, "tier": "enterprise", "model": spec.get("model", ""),
-            "credential_present": bool(key_env and _resolve_credential(key_env)),
+            "credential_present": api_present,
             "key_env": key_env,   # the NAME only, never the value
+            "subscription_cli": cli_bin,          # CLI binary NAME only, never a token
+            "subscription_present": sub_present,  # official CLI on PATH (cli-auth)
+            "access": access,                     # primary tier: subscription > api > none
         })
     healthy_local = sum(1 for e in local if e["healthy"])
     return {"schema": "flywheel.endpoint-roster/v1",
             "local": local, "enterprise": enterprise,
             "local_healthy": healthy_local, "local_total": len(local),
-            "enterprise_configured": sum(1 for e in enterprise if e["credential_present"])}
+            "enterprise_configured": sum(1 for e in enterprise if e["credential_present"]),
+            "subscription_available": sum(1 for e in enterprise if e["subscription_present"]),
+            "enterprise_usable": sum(1 for e in enterprise if e["access"] != "none")}
 
 
 def world_state(root: Path, catalog=RECEIPT_CATALOG) -> dict:
