@@ -66,6 +66,18 @@ def _guard(transport, method, url, headers, body, timeout, name):
         raise BackendError(f"{name} unreachable: {e}") from e
 
 
+def _clean_cli_env() -> dict:
+    """Environment for a spawned subscription CLI. Strips this process's Claude
+    Code session markers (CLAUDECODE, CLAUDE_CODE_*) so a gateway launched from
+    INSIDE Claude Code -- or the desktop, which is Claude Code -- does not spawn
+    a confused nested session (the child otherwise inherits the parent's session
+    id and misbehaves). The CLI's auth lives in its own config, not these runtime
+    vars, so clearing them is safe: verified that the client still reaches its
+    provider with the full prefix stripped."""
+    return {k: v for k, v in os.environ.items()
+            if k != "CLAUDECODE" and not k.startswith("CLAUDE_CODE")}
+
+
 @dataclass
 class OpenAICompatBackend:
     """OpenAI-compatible /chat/completions: OpenAI (codex api), DeepSeek, a
@@ -305,7 +317,8 @@ class CliBackend:
             if self.runner is not None:
                 rc, out, err = self.runner(cmd)
             else:
-                p = subprocess.run(cmd, capture_output=True, timeout=self.timeout)
+                p = subprocess.run(cmd, capture_output=True, timeout=self.timeout,
+                                   env=_clean_cli_env())
                 rc, out, err = p.returncode, p.stdout, p.stderr
         except (OSError, subprocess.SubprocessError) as e:
             raise BackendError(f"{self.name} cli failed: {e}") from e
