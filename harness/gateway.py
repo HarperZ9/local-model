@@ -1036,263 +1036,355 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._safe_500(e)
 
+    _GET_ROUTES = {
+        '/api/endpoints/health': '_get_api_endpoints_health',
+        '/api/endpoints': '_get_api_endpoints',
+        '/api/world': '_get_api_world',
+        '/api/lanes': '_get_api_lanes',
+        '/api/training/status': '_get_api_training_status',
+        '/api/train/duel': '_get_api_train_duel',
+        '/api/train/loop': '_get_api_train_loop',
+        '/api/loops': '_get_api_loops',
+        '/api/tension': '_get_api_tension',
+        '/api/instruments': '_get_api_instruments',
+        '/api/typeface/gallery': '_get_api_typeface_gallery',
+        '/api/typeface/face': '_get_api_typeface_face',
+        '/api/academy': '_get_api_academy',
+        '/api/frontier': '_get_api_frontier',
+        '/api/retention': '_get_api_retention',
+        '/api/comprehension': '_get_api_comprehension',
+        '/api/readiness': '_get_api_readiness',
+        '/api/credo': '_get_api_credo',
+        '/api/feeds': '_get_api_feeds',
+        '/api/uplift': '_get_api_uplift',
+        '/api/graph': '_get_api_graph',
+        '/api/receipts': '_get_api_receipts',
+        '/api/receipts/proof': '_get_api_receipts_proof',
+        '/api/profiles': '_get_api_profiles',
+        '/api/workflows': '_get_api_workflows',
+        '/api/workflow/run': '_get_api_workflow_run',
+        '/api/science/runs': '_get_api_science_runs',
+        '/api/science/run': '_get_api_science_run',
+        '/api/agent/runs': '_get_api_agent_runs',
+        '/api/agent/run': '_get_api_agent_run',
+        '/api/memory': '_get_api_memory',
+        '/api/memory/list': '_get_api_memory_list',
+        '/api/plugins': '_get_api_plugins',
+        '/api/parity': '_get_api_parity',
+        '/api/projects': '_get_api_projects',
+        '/api/store': '_get_api_store',
+        '/api/store/verify': '_get_api_store_verify',
+        '/api/store/audit': '_get_api_store_audit',
+        '/api/marketplace': '_get_api_marketplace',
+        '/api/keychain': '_get_api_keychain',
+        '/api/plugins/probe': '_get_api_plugins_probe',
+        '/api/router/stats': '_get_api_router_stats',
+        '/v1/models': '_get_v1_models',
+    }
+
     def _get(self):
         p = self.path.split("?", 1)[0]
         qs = self.path.split("?", 1)[1] if "?" in self.path else ""
-        if p == "/api/endpoints/health":
-            return self._json(endpoint_roster(self.serve_url, self.ollama_url))
-        if p == "/api/endpoints":
-            return self._json(_unified_roster())     # full universal-router roster
-        if p == "/api/world":
-            return self._json(_projected_world(self.root))
-        if p == "/api/lanes":                        # the lane roster (umbrella layer)
-            from harness.lanes import lane_roster
-            probe = "probe=true" in qs or "probe=1" in qs
-            return self._json(lane_roster(probe=probe))
-        if p == "/api/training/status":
-            return self._json(_training_status(self.run_root))
-        if p == "/api/train/duel":                    # verified-inference duel summary (read-only)
-            from harness.train_surface import duel_summary
-            return self._json(duel_summary())
-        if p == "/api/train/loop":                    # the loop-closure self-audit (on demand)
-            from harness.train_surface import loop_status
-            try:
-                return self._json(loop_status())
-            except Exception as e:
-                return self._json({"error": f"{type(e).__name__}: {e}"}, 502)
-        if p == "/api/loops":                        # which candidate loops close? measured, not drawn
-            from harness.loops import measure_all_loops
-            return self._json(measure_all_loops())
-        if p == "/api/tension":                      # measurement disagreements, kept re-checkable
-            from harness.tension_ledger import tension_ledger
-            return self._json(tension_ledger())
-        if p == "/api/instruments":                  # the evaluation-engineering register
-            from harness.eval_engineering import instrument_register
-            return self._json(instrument_register())
-        if p == "/api/typeface/gallery":             # the marketplace of published faces (metadata)
-            from urllib.parse import unquote_plus
-            limit = 60
-            for part in qs.split("&"):
-                if part.startswith("limit="):
-                    try:
-                        limit = int(unquote_plus(part[6:]))
-                    except ValueError:
-                        pass
-            from harness.typeface_gallery import gallery
-            return self._json(gallery(limit=limit))
-        if p == "/api/typeface/face":                # one published face, bytes included
-            from urllib.parse import unquote_plus
-            eid = ""
-            for part in qs.split("&"):
-                if part.startswith("eid="):
-                    eid = unquote_plus(part[4:])
-            from harness.typeface_gallery import fetch_face
-            out = fetch_face(eid)
-            return self._json(out, 404 if "error" in out else 200)
-        if p == "/api/academy":                      # the curriculum, derived from the live code
-            from harness.academy_pipeline import academy_curriculum
-            return self._json(academy_curriculum())
-        if p == "/api/frontier":                     # the RAM/compute frontier, measured here
-            from harness.frontier import frontier_table
-            from harness.store import get_entity, query_entities
-            probes = []
-            seen = set()
-            for meta in query_entities(kind="capability"):
-                e = get_entity(meta["eid"])
-                if e and isinstance(e.get("data"), dict):
-                    ep = e["data"].get("endpoint", "")
-                    if ep and ep not in seen:      # newest probe per endpoint
-                        seen.add(ep)
-                        probes.append(e["data"])
-            return self._json(frontier_table(self.root, probes=probes))
-        if p == "/api/retention":                    # what is still held, not what was once shown
-            from harness.retention import retention_due
-            days = 3.0
-            for part in qs.split("&"):
-                if part.startswith("days="):
-                    try:
-                        days = max(0.0, float(part[5:]))
-                    except ValueError:
-                        days = 3.0
-            return self._json(retention_due(days=days))
-        if p == "/api/comprehension":                # ownership from checked evidence, not blame
-            from urllib.parse import unquote_plus
-            from harness.comprehension_ledger import comprehension_ledger
-            project = None
-            for part in qs.split("&"):
-                if part.startswith("project="):
-                    project = unquote_plus(part[8:]) or None
-            return self._json(comprehension_ledger(project=project))
-        if p == "/api/readiness":                    # release readiness, measured not felt
-            from harness.release_readiness import readiness_report
-            return self._json(readiness_report())
-        if p == "/api/credo":                        # the belief, content-addressed and retrievable
-            from harness.credo import credo_doc
-            return self._json(credo_doc())
-        if p == "/api/feeds":                        # cross-domain live feeds through gather
-            from urllib.parse import unquote_plus
-            from harness.live_feeds import live_feeds
-            domain = None
-            for part in qs.split("&"):
-                if part.startswith("domain="):
-                    domain = unquote_plus(part[7:]) or None
-            return self._json(live_feeds(domain=domain))
-        if p == "/api/uplift":                       # bare-vs-wrapped uplift bench (read-only roster)
-            from harness.uplift_bench import bench_summary
-            return self._json(bench_summary(self.root))
-        if p == "/api/graph":                        # cross-surface knowledge graph + context plan
-            from urllib.parse import unquote_plus
-            from harness.knowledge_graph import gateway_graph
-            budget = None
-            with_index = False
-            query = None
-            for part in qs.split("&"):
-                if part.startswith("budget="):
-                    try:
-                        budget = int(part[7:])
-                    except ValueError:
-                        budget = None
-                if part == "index=true":
-                    with_index = True
-                if part.startswith("q="):
-                    query = unquote_plus(part[2:])
-            return self._json(gateway_graph(self.root, self.run_root,
-                                            with_index=with_index,
-                                            budget=budget, query=query))
-        if p == "/api/receipts":                     # the receipts ledger (catalog + envelopes)
-            return self._json(receipts_ledger(self.root, self.run_root))
-        if p == "/api/receipts/proof":               # prove one receipt is in the log
-            leaf = ""
-            for part in qs.split("&"):
-                if part.startswith("leaf="):
-                    leaf = part[5:].strip()
-            if len(leaf) != 64:
-                return self._json({"error": "provide 'leaf' (a 64-hex "
-                                            "envelope sha256)"}, 400)
-            from harness.transparency_log import (inclusion_proof,
-                                                  merkle_root)
-            led = receipts_ledger(self.root, self.run_root)
-            leaves = [e["sha256"] for e in led["envelopes"]]
-            if leaf not in leaves:
-                return self._json({"error": "leaf not in the receipts log",
-                                   "leaf": leaf, "merkle_root":
-                                   led["merkle_root"]}, 404)
-            idx = leaves.index(leaf)
-            return self._json({"schema": "flywheel.receipts-proof/v1",
-                               "leaf": leaf,
-                               "merkle_root": merkle_root(leaves),
-                               "proof": inclusion_proof(leaves, idx),
-                               "note": "verify offline with "
-                                       "transparency_log.verify_inclusion("
-                                       "leaf, proof, merkle_root)"})
-        if p == "/api/profiles":                     # profile manifests over the one substrate
-            from harness.profiles import profile_roster
-            return self._json(profile_roster())
-        if p == "/api/workflows":                    # workflow definitions + recent runs
-            from harness.workflows import workflow_roster
-            return self._json(workflow_roster(self.run_root))
-        if p == "/api/workflow/run":                 # one run's stored trace, chain-reverified
-            from harness.workflows import workflow_run_detail
-            return self._json(workflow_run_detail(
-                self.run_root, _qs_value(qs, "chain")))
-        if p == "/api/science/runs":                 # eval history, chain-reverified
-            from harness.eval_store import science_runs
-            return self._json(science_runs(
-                self.run_root, limit=_qs_int(qs, "limit", 20)))
-        if p == "/api/science/run":                  # one stored science run
-            from harness.eval_store import science_run_detail
-            return self._json(science_run_detail(
-                self.run_root, _qs_value(qs, "chain")))
-        if p == "/api/agent/runs":                   # agent-run history, content-addressed
-            from harness.eval_store import agent_runs
-            return self._json(agent_runs(
-                self.run_root, limit=_qs_int(qs, "limit", 20)))
-        if p == "/api/agent/run":                    # one stored agent run
-            from harness.eval_store import agent_run_detail
-            return self._json(agent_run_detail(
-                self.run_root, _qs_value(qs, "id")))
-        if p == "/api/memory":                       # durable memory stats (fold index)
-            from harness.memory_api import memory_stats
-            return self._json(memory_stats(self.run_root))
-        if p == "/api/memory/list":                  # browse stored spans, verbatim
-            from harness.memory_api import memory_list
-            limit = 20
-            for part in qs.split("&"):
-                if part.startswith("limit="):
-                    try:
-                        limit = int(part[6:])
-                    except ValueError:
-                        limit = 20
-            return self._json(memory_list(self.run_root, limit=limit))
-        if p == "/api/plugins":                      # every mounted capability, one manifest shape
-            from harness.plugins import plugin_roster
-            return self._json(plugin_roster())
-        if p == "/api/parity":                       # the capability matrix, witnessed not asserted
-            from harness.parity import parity_matrix
-            return self._json(parity_matrix())
-        if p == "/api/projects":                     # the registered project/directory roster
-            from harness.projects import project_roster
-            return self._json(project_roster())
-        if p == "/api/store":                        # verifiable substrate stats
-            from harness.store import stats
-            return self._json(stats())
-        if p == "/api/store/verify":                 # walk the chain AND re-check the records
-            from harness.store import verify_chain, verify_records
-            chain = verify_chain()
-            records = verify_records()
-            return self._json({"schema": "flywheel.store-verify/v1",
-                               "ok": bool(chain.get("ok"))
-                               and bool(records.get("ok")),
-                               "chain": chain, "records": records,
-                               "note": "ok requires BOTH the ledger chain "
-                                       "and the records it attests; a "
-                                       "tampered entity fails records even "
-                                       "when the chain still verifies"})
-        if p == "/api/store/audit":                  # the hash-chained audit tail
-            from harness.store import audit_tail
-            n = 50
-            for part in qs.split("&"):
-                if part.startswith("n="):
-                    try:
-                        n = int(part[2:])
-                    except ValueError:
-                        n = 50
-            return self._json({"schema": "flywheel.store-audit/v1",
-                               "entries": audit_tail(n)})
-        if p == "/api/marketplace":                  # curated catalog over the plugin registry
-            from harness.marketplace import marketplace_catalog
-            return self._json(marketplace_catalog())
-        if p == "/api/keychain":                     # credential names + presence, never values
-            from harness.keychain import credential_source, keychain_available
-            try:
-                from harness.endpoints import PROVIDERS
-            except Exception:
-                PROVIDERS = {}
-            names = sorted({s.get("key", "") for s in PROVIDERS.values()
-                            if s.get("key")})
-            return self._json({
-                "schema": "flywheel.keychain/v1",
-                "available": keychain_available(),
-                "entries": [{"name": n, "source": credential_source(n)}
-                            for n in names],
-                "note": "presence and source only; values never leave "
-                        "resolution inside a routed call"})
-        if p == "/api/plugins/probe":                # spawn a plugin's server, report its real tools
-            from harness.plugins import probe_plugin
-            name = ""
-            for part in qs.split("&"):
-                if part.startswith("name="):
-                    name = urllib.parse.unquote(part[5:])
-            if not name:
-                return self._json({"error": "provide ?name="}, 400)
-            return self._json(probe_plugin(name))
-        if p == "/api/router/stats":                 # observed per-provider success/cost
-            return self._json(get_router_stats().snapshot())
-        if p == "/v1/models":                        # OpenAI-compatible model list (the roster)
-            return self._json(openai_models())
+        _mn = self._GET_ROUTES.get(p)
+        if _mn is not None:
+            return getattr(self, _mn)(p, qs)
         if p.startswith("/v1/") or p == "/generate" or p == "/health":
             return self._proxy(self.serve_url.rstrip("/") + p)
         return self._static(p)
+
+    def _get_api_endpoints_health(self, p, qs):
+        return self._json(endpoint_roster(self.serve_url, self.ollama_url))
+
+    def _get_api_endpoints(self, p, qs):
+        return self._json(_unified_roster())     # full universal-router roster
+
+    def _get_api_world(self, p, qs):
+        return self._json(_projected_world(self.root))
+
+    def _get_api_lanes(self, p, qs):
+        from harness.lanes import lane_roster
+        probe = "probe=true" in qs or "probe=1" in qs
+        return self._json(lane_roster(probe=probe))
+
+    def _get_api_training_status(self, p, qs):
+        return self._json(_training_status(self.run_root))
+
+    def _get_api_train_duel(self, p, qs):
+        from harness.train_surface import duel_summary
+        return self._json(duel_summary())
+
+    def _get_api_train_loop(self, p, qs):
+        from harness.train_surface import loop_status
+        try:
+            return self._json(loop_status())
+        except Exception as e:
+            return self._json({"error": f"{type(e).__name__}: {e}"}, 502)
+
+    def _get_api_loops(self, p, qs):
+        from harness.loops import measure_all_loops
+        return self._json(measure_all_loops())
+
+    def _get_api_tension(self, p, qs):
+        from harness.tension_ledger import tension_ledger
+        return self._json(tension_ledger())
+
+    def _get_api_instruments(self, p, qs):
+        from harness.eval_engineering import instrument_register
+        return self._json(instrument_register())
+
+    def _get_api_typeface_gallery(self, p, qs):
+        from urllib.parse import unquote_plus
+        limit = 60
+        for part in qs.split("&"):
+            if part.startswith("limit="):
+                try:
+                    limit = int(unquote_plus(part[6:]))
+                except ValueError:
+                    pass
+        from harness.typeface_gallery import gallery
+        return self._json(gallery(limit=limit))
+
+    def _get_api_typeface_face(self, p, qs):
+        from urllib.parse import unquote_plus
+        eid = ""
+        for part in qs.split("&"):
+            if part.startswith("eid="):
+                eid = unquote_plus(part[4:])
+        from harness.typeface_gallery import fetch_face
+        out = fetch_face(eid)
+        return self._json(out, 404 if "error" in out else 200)
+
+    def _get_api_academy(self, p, qs):
+        from harness.academy_pipeline import academy_curriculum
+        return self._json(academy_curriculum())
+
+    def _get_api_frontier(self, p, qs):
+        from harness.frontier import frontier_table
+        from harness.store import get_entity, query_entities
+        probes = []
+        seen = set()
+        for meta in query_entities(kind="capability"):
+            e = get_entity(meta["eid"])
+            if e and isinstance(e.get("data"), dict):
+                ep = e["data"].get("endpoint", "")
+                if ep and ep not in seen:      # newest probe per endpoint
+                    seen.add(ep)
+                    probes.append(e["data"])
+        return self._json(frontier_table(self.root, probes=probes))
+
+    def _get_api_retention(self, p, qs):
+        from harness.retention import retention_due
+        days = 3.0
+        for part in qs.split("&"):
+            if part.startswith("days="):
+                try:
+                    days = max(0.0, float(part[5:]))
+                except ValueError:
+                    days = 3.0
+        return self._json(retention_due(days=days))
+
+    def _get_api_comprehension(self, p, qs):
+        from urllib.parse import unquote_plus
+        from harness.comprehension_ledger import comprehension_ledger
+        project = None
+        for part in qs.split("&"):
+            if part.startswith("project="):
+                project = unquote_plus(part[8:]) or None
+        return self._json(comprehension_ledger(project=project))
+
+    def _get_api_readiness(self, p, qs):
+        from harness.release_readiness import readiness_report
+        return self._json(readiness_report())
+
+    def _get_api_credo(self, p, qs):
+        from harness.credo import credo_doc
+        return self._json(credo_doc())
+
+    def _get_api_feeds(self, p, qs):
+        from urllib.parse import unquote_plus
+        from harness.live_feeds import live_feeds
+        domain = None
+        for part in qs.split("&"):
+            if part.startswith("domain="):
+                domain = unquote_plus(part[7:]) or None
+        return self._json(live_feeds(domain=domain))
+
+    def _get_api_uplift(self, p, qs):
+        from harness.uplift_bench import bench_summary
+        return self._json(bench_summary(self.root))
+
+    def _get_api_graph(self, p, qs):
+        from urllib.parse import unquote_plus
+        from harness.knowledge_graph import gateway_graph
+        budget = None
+        with_index = False
+        query = None
+        for part in qs.split("&"):
+            if part.startswith("budget="):
+                try:
+                    budget = int(part[7:])
+                except ValueError:
+                    budget = None
+            if part == "index=true":
+                with_index = True
+            if part.startswith("q="):
+                query = unquote_plus(part[2:])
+        return self._json(gateway_graph(self.root, self.run_root,
+                                        with_index=with_index,
+                                        budget=budget, query=query))
+
+    def _get_api_receipts(self, p, qs):
+        return self._json(receipts_ledger(self.root, self.run_root))
+
+    def _get_api_receipts_proof(self, p, qs):
+        leaf = ""
+        for part in qs.split("&"):
+            if part.startswith("leaf="):
+                leaf = part[5:].strip()
+        if len(leaf) != 64:
+            return self._json({"error": "provide 'leaf' (a 64-hex "
+                                        "envelope sha256)"}, 400)
+        from harness.transparency_log import (inclusion_proof,
+                                              merkle_root)
+        led = receipts_ledger(self.root, self.run_root)
+        leaves = [e["sha256"] for e in led["envelopes"]]
+        if leaf not in leaves:
+            return self._json({"error": "leaf not in the receipts log",
+                               "leaf": leaf, "merkle_root":
+                               led["merkle_root"]}, 404)
+        idx = leaves.index(leaf)
+        return self._json({"schema": "flywheel.receipts-proof/v1",
+                           "leaf": leaf,
+                           "merkle_root": merkle_root(leaves),
+                           "proof": inclusion_proof(leaves, idx),
+                           "note": "verify offline with "
+                                   "transparency_log.verify_inclusion("
+                                   "leaf, proof, merkle_root)"})
+
+    def _get_api_profiles(self, p, qs):
+        from harness.profiles import profile_roster
+        return self._json(profile_roster())
+
+    def _get_api_workflows(self, p, qs):
+        from harness.workflows import workflow_roster
+        return self._json(workflow_roster(self.run_root))
+
+    def _get_api_workflow_run(self, p, qs):
+        from harness.workflows import workflow_run_detail
+        return self._json(workflow_run_detail(
+            self.run_root, _qs_value(qs, "chain")))
+
+    def _get_api_science_runs(self, p, qs):
+        from harness.eval_store import science_runs
+        return self._json(science_runs(
+            self.run_root, limit=_qs_int(qs, "limit", 20)))
+
+    def _get_api_science_run(self, p, qs):
+        from harness.eval_store import science_run_detail
+        return self._json(science_run_detail(
+            self.run_root, _qs_value(qs, "chain")))
+
+    def _get_api_agent_runs(self, p, qs):
+        from harness.eval_store import agent_runs
+        return self._json(agent_runs(
+            self.run_root, limit=_qs_int(qs, "limit", 20)))
+
+    def _get_api_agent_run(self, p, qs):
+        from harness.eval_store import agent_run_detail
+        return self._json(agent_run_detail(
+            self.run_root, _qs_value(qs, "id")))
+
+    def _get_api_memory(self, p, qs):
+        from harness.memory_api import memory_stats
+        return self._json(memory_stats(self.run_root))
+
+    def _get_api_memory_list(self, p, qs):
+        from harness.memory_api import memory_list
+        limit = 20
+        for part in qs.split("&"):
+            if part.startswith("limit="):
+                try:
+                    limit = int(part[6:])
+                except ValueError:
+                    limit = 20
+        return self._json(memory_list(self.run_root, limit=limit))
+
+    def _get_api_plugins(self, p, qs):
+        from harness.plugins import plugin_roster
+        return self._json(plugin_roster())
+
+    def _get_api_parity(self, p, qs):
+        from harness.parity import parity_matrix
+        return self._json(parity_matrix())
+
+    def _get_api_projects(self, p, qs):
+        from harness.projects import project_roster
+        return self._json(project_roster())
+
+    def _get_api_store(self, p, qs):
+        from harness.store import stats
+        return self._json(stats())
+
+    def _get_api_store_verify(self, p, qs):
+        from harness.store import verify_chain, verify_records
+        chain = verify_chain()
+        records = verify_records()
+        return self._json({"schema": "flywheel.store-verify/v1",
+                           "ok": bool(chain.get("ok"))
+                           and bool(records.get("ok")),
+                           "chain": chain, "records": records,
+                           "note": "ok requires BOTH the ledger chain "
+                                   "and the records it attests; a "
+                                   "tampered entity fails records even "
+                                   "when the chain still verifies"})
+
+    def _get_api_store_audit(self, p, qs):
+        from harness.store import audit_tail
+        n = 50
+        for part in qs.split("&"):
+            if part.startswith("n="):
+                try:
+                    n = int(part[2:])
+                except ValueError:
+                    n = 50
+        return self._json({"schema": "flywheel.store-audit/v1",
+                           "entries": audit_tail(n)})
+
+    def _get_api_marketplace(self, p, qs):
+        from harness.marketplace import marketplace_catalog
+        return self._json(marketplace_catalog())
+
+    def _get_api_keychain(self, p, qs):
+        from harness.keychain import credential_source, keychain_available
+        try:
+            from harness.endpoints import PROVIDERS
+        except Exception:
+            PROVIDERS = {}
+        names = sorted({s.get("key", "") for s in PROVIDERS.values()
+                        if s.get("key")})
+        return self._json({
+            "schema": "flywheel.keychain/v1",
+            "available": keychain_available(),
+            "entries": [{"name": n, "source": credential_source(n)}
+                        for n in names],
+            "note": "presence and source only; values never leave "
+                    "resolution inside a routed call"})
+
+    def _get_api_plugins_probe(self, p, qs):
+        from harness.plugins import probe_plugin
+        name = ""
+        for part in qs.split("&"):
+            if part.startswith("name="):
+                name = urllib.parse.unquote(part[5:])
+        if not name:
+            return self._json({"error": "provide ?name="}, 400)
+        return self._json(probe_plugin(name))
+
+    def _get_api_router_stats(self, p, qs):
+        return self._json(get_router_stats().snapshot())
+
+    def _get_v1_models(self, p, qs):
+        return self._json(openai_models())
 
     def _post(self):
         p = self.path.split("?", 1)[0]
