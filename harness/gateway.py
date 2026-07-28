@@ -1389,848 +1389,1022 @@ class _Handler(BaseHTTPRequestHandler):
     def _post(self):
         p = self.path.split("?", 1)[0]
         if p == "/v1/chat/completions":              # OpenAI-compatible, routes to ANY provider
-            req, err = self._read_json(openai_error=True)
-            if err:
-                return self._json(*err)
-            if req.get("stream"):
-                return self._sse_chat(req)
-            from harness.scaffold import scaffold_answer, scaffold_turn
-            # hash and freeze the flattened prompt the model was actually
-            # sent, so the turn receipt is reproducible by a stranger
-            _sys, _prompt = _flatten_messages(req.get("messages", []))
-            env = scaffold_turn("\n".join(x for x in (_sys, _prompt) if x))
-            body, code, _r, _t, _m = openai_chat(req, self.serve_url)
-            if code == 200 and isinstance(body, dict):
-                try:
-                    content = body["choices"][0]["message"]["content"]
-                except (KeyError, IndexError, TypeError):
-                    content = ""
-                # extension field: OpenAI clients ignore unknown keys
-                body["flywheel_scaffold"] = scaffold_answer(
-                    str(content or ""), env,
-                    provenance={"endpoint": "v1",
-                                "model_ref": str(body.get("model") or "")})
-            return self._json(body, code)
+            return self._post_v1_chat_completions_0(p)
         if p == "/v1/embeddings":                    # OpenAI-compatible, routed to a provider
-            req, err = self._read_json(openai_error=True)
-            if err:
-                return self._json(*err)
-            body, code = openai_embeddings(req)
-            return self._json(body, code)
+            return self._post_v1_embeddings_1(p)
         if p.startswith("/v1/") or p == "/generate":
-            return self._proxy(self.serve_url.rstrip("/") + p)
+            return self._post_v1_2(p)
         if p == "/api/forge":                        # goal -> verified PRP (the studio)
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            goal = (req.get("goal") or "").strip()
-            if not goal:
-                return self._json({"error": "provide a non-empty 'goal'"}, 400)
-            doc = _forge(
-                goal, examples=req.get("examples"),
-                documentation=req.get("documentation"),
-                context=req.get("context", ""),
-                intent_source=str(req.get("intent_source", "")),
-                architecture_source=str(req.get("architecture_source", "")))
-            if "error" not in doc:
-                # seal the Y-chain server-side so the later drift recheck
-                # never trusts the checked party for the sealed half
-                doc["prp_id"] = persist_forge_seal(
-                    self.run_root, goal,
-                    intent_sha256=str(doc.get("intent_sha256", "")),
-                    architecture_sha256=str(doc.get("architecture_sha256", "")))
-            return self._json(doc)
+            return self._post_api_forge_3(p)
         if p == "/api/academy/complete":             # bind a passed receipt to a lesson
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            lesson_id = str(req.get("lesson_id", "")).strip()
-            eid = str(req.get("comprehension_eid", "")).strip()
-            if not lesson_id or not eid:
-                return self._json({"error": "provide 'lesson_id' and "
-                                            "'comprehension_eid'"}, 400)
-            from harness.academy_pipeline import academy_complete
-            doc = academy_complete(lesson_id, eid)
-            return self._json(doc, 200 if doc.get("bound") else 400)
+            return self._post_api_academy_complete_4(p)
         if p == "/api/forge/recheck":                # did an arm drift since the forge?
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            if req.get("intent_sha256") or req.get("architecture_sha256"):
-                return self._json(
-                    {"error": "caller-supplied sealed hashes are refused: "
-                              "the checked party must not author its own "
-                              "criterion. Provide 'prp_id' from the forge "
-                              "response; the seal is read server-side"}, 400)
-            out = forge_recheck(self.run_root, req.get("prp_id", ""), req)
-            return self._json(out, 400 if "error" in out else 200)
+            return self._post_api_forge_recheck_5(p)
         if p == "/api/science":                       # evidence -> spec -> witnessed judgment, one chain
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            question = (req.get("question") or "").strip()
-            if not question:
-                return self._json({"error": "provide a non-empty 'question'"}, 400)
-            from harness.science_bench import science_run
-            try:
-                max_sources = max(1, min(int(req.get("max_sources", 4)), 10))
-            except (TypeError, ValueError):
-                max_sources = 4
-            claims = req.get("claims") if isinstance(req.get("claims"), list) else None
-            measurements = (req.get("measurements")
-                            if isinstance(req.get("measurements"), list) else None)
-            from pathlib import Path as _P
-            doc = science_run(
-                question, claims=claims, measurements=measurements,
-                max_sources=max_sources,
-                workdir=_P(self.run_root) / "science")
-            # history is best-effort: a full disk never blocks the answer,
-            # but an unpersisted run says so instead of pretending
-            try:
-                from harness.eval_store import save_science_run
-                doc["receipt_path"] = save_science_run(
-                    self.run_root, doc)["receipt_path"]
-            except Exception as e:
-                doc["receipt_note"] = (
-                    f"run not persisted: {type(e).__name__}: {e}")
-            return self._json(doc)
+            return self._post_api_science_6(p)
         if p == "/api/retrieve":                      # retrieval that cites its evidence
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            query = (req.get("query") or "").strip()
-            if not query:
-                return self._json({"error": "provide a non-empty 'query'"}, 400)
-            root, err = _resolve_workspace_root(req.get("root"), self.root)
-            if err:
-                return self._json({"error": err}, 400)
-            try:
-                k = max(1, min(int(req.get("k", 8)), 50))
-            except (TypeError, ValueError):
-                k = 8
-            from harness.bm25_retrieval import build_index, search
-            index = build_index(root)
-            return self._json({"schema": "flywheel.retrieval/v1",
-                               "query": query,
-                               "hits": search(index, query, k=k),
-                               "indexed_files": index["files"],
-                               "skipped": index["skipped"]})
+            return self._post_api_retrieve_7(p)
         if p == "/api/snapshot":                      # the citation, frozen: bytes as the receipt
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            url = (req.get("url") or "").strip()
-            if not url.startswith(("http://", "https://")):
-                return self._json({"error": "provide an http(s) 'url'"}, 400)
-            from pathlib import Path as _P
-            from harness.web_snapshot import snapshot_url
-            doc = snapshot_url(url, _P(self.run_root) / "snapshots")
-            if "error" not in doc:
-                try:
-                    from harness.store import put_entity
-                    doc["stored"] = put_entity("web-snapshot", doc).get("eid", "")
-                except Exception as e:
-                    doc["stored"] = f"store unavailable: {type(e).__name__}"
-            return self._json(doc)
+            return self._post_api_snapshot_8(p)
         if p == "/api/import":                        # arrive with your whole setup, keep the proof
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            root, err = _resolve_workspace_root(req.get("root"), self.root)
-            if err:
-                return self._json({"error": err}, 400)
-            from harness.import_adapters import import_config
-            doc = import_config(root)
-            try:
-                from harness.store import put_entity
-                doc["stored"] = put_entity("import-manifest", doc).get("eid", "")
-            except Exception as e:
-                doc["stored"] = f"store unavailable: {type(e).__name__}"
-            return self._json(doc)
+            return self._post_api_import_9(p)
         if p == "/api/lean":                          # the apex oracle: the kernel decides
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            code = req.get("code") or ""
-            if not code.strip():
-                return self._json({"error": "provide non-empty 'code'"}, 400)
-            from harness.lean_oracle import lean_check
-            doc = lean_check(code)
-            try:
-                from harness.store import put_entity
-                doc["stored"] = put_entity("lean", doc).get("eid", "")
-            except Exception as e:
-                doc["stored"] = f"store unavailable: {type(e).__name__}"
-            return self._json(doc)
+            return self._post_api_lean_10(p)
         if p == "/api/invent":                        # generation under witness: propose, judge, keep
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            k = req.get("k", 12)
-            if not isinstance(k, int) or isinstance(k, bool) or not 1 <= k <= 50:
-                return self._json({"error": "provide integer 'k' in 1..50"}, 400)
-            offset = req.get("offset", 0)
-            if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
-                return self._json({"error": "'offset' must be a non-negative integer"}, 400)
-            from harness.conjecture_forge import forge_round
-            return self._json(forge_round(k, offset=offset))
+            return self._post_api_invent_11(p)
         if p == "/api/scaffold":                      # the full turn guarantee for external wrappers
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            prompt = str(req.get("prompt") or "")
-            answer = str(req.get("answer") or "")
-            if not prompt and not answer:
-                return self._json({"error": "provide 'prompt' and/or 'answer'"}, 400)
-            from harness.scaffold import scaffold_answer, scaffold_turn
-            env = scaffold_turn(prompt)
-            cites = req.get("citations")
-            doc = scaffold_answer(answer, env,
-                                  citations=cites if isinstance(cites, list)
-                                  else None)
-            return self._json(doc)
+            return self._post_api_scaffold_12(p)
         if p == "/api/suite":                         # can this acceptance suite refuse wrong code?
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            path = (req.get("path") or "").strip()
-            if not path:
-                return self._json({"error": "provide a project 'path'"}, 400)
-            mm = req.get("max_mutants", 5)
-            if not isinstance(mm, int) or isinstance(mm, bool) or not 1 <= mm <= 20:
-                return self._json({"error": "'max_mutants' must be an integer in 1..20"}, 400)
-            from harness.suite_audit import audit_suite
-            doc = audit_suite(path, oracle_cmd=str(
-                req.get("oracle_cmd", "python -m pytest tests/ -q")),
-                max_mutants=mm)
-            return self._json(doc, 400 if "error" in doc else 200)
+            return self._post_api_suite_13(p)
         if p == "/api/tension":                       # bank a measurement pair with frozen sources
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            if not isinstance(req.get("a"), dict) or not isinstance(req.get("b"), dict):
-                return self._json({"error": "provide measurement objects 'a' and 'b'"}, 400)
-            from harness.tension_ledger import bank_tension
-            doc = bank_tension(req["a"], req["b"])
-            return self._json(doc, 400 if "error" in doc else 200)
+            return self._post_api_tension_14(p)
         if p == "/api/capability":                    # probe a model on THIS machine
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            endpoint = (req.get("endpoint") or "").strip()
-            if not endpoint:
-                return self._json({"error": "provide a non-empty 'endpoint'"}, 400)
-            from harness.frontier import capability_probe
-            doc = capability_probe(endpoint)
-            if "error" not in doc:
-                if isinstance(req.get("disk_gb"), (int, float)):
-                    doc["disk_gb"] = float(req["disk_gb"])
-                    doc["disk_gb_source"] = "declared by caller"
-                try:
-                    from harness.store import put_entity
-                    doc["stored"] = put_entity("capability", doc).get("eid", "")
-                except Exception as e:
-                    doc["stored"] = f"store unavailable: {type(e).__name__}"
-            return self._json(doc)
+            return self._post_api_capability_15(p)
         if p == "/api/retention":                     # bank an unaided retest outcome, linked
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            original = (req.get("original") or "").strip()
-            if not original or not isinstance(req.get("passed"), bool):
-                return self._json({"error": "provide 'original' (entity id) "
-                                            "and boolean 'passed'"}, 400)
-            from harness.retention import retention_record
-            return self._json(retention_record(
-                original, req["passed"], note=str(req.get("note", ""))))
+            return self._post_api_retention_16(p)
         if p == "/api/explain":                       # the teach-back as a receipt (engagement, mechanical)
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            diff = req.get("diff") or ""
-            explanation = req.get("explanation") or ""
-            if not diff.strip() or not explanation.strip():
-                return self._json({"error": "provide 'diff' and 'explanation'"}, 400)
-            from harness.explanation_gate import explanation_receipt
+            return self._post_api_explain_17(p)
+        if p == "/api/attest":                        # ownership made checkable: sign-off bound to the walk
+            return self._post_api_attest_18(p)
+        if p == "/api/route":                         # universal router: send to ANY provider, with a receipt
+            return self._post_api_route_19(p)
+        if p == "/api/companion":                     # the seat: answer local, escalate the hard slice
+            return self._post_api_companion_20(p)
+        if p == "/api/agent":                          # the agentic tool loop over ANY provider
+            return self._post_api_agent_21(p)
+        if p == "/api/workflow":                       # staged run with a chained receipt, any endpoint
+            return self._post_api_workflow_22(p)
+        if p == "/api/memory/recall":                  # verbatim recall from the fold index
+            return self._post_api_memory_recall_23(p)
+        if p == "/api/plugins/register":               # register a custom MCP server by argv
+            return self._post_api_plugins_register_24(p)
+        if p == "/api/keychain/set":                   # store a secret in the OS keychain
+            return self._post_api_keychain_set_25(p)
+        if p == "/api/keychain/delete":                # remove a stored secret
+            return self._post_api_keychain_delete_26(p)
+        if p == "/api/store/entity":                   # store a content-addressed entity
+            return self._post_api_store_entity_27(p)
+        if p == "/api/store/query":                    # query entities by kind/project
+            return self._post_api_store_query_28(p)
+        if p == "/api/projects/add":                   # register a project directory
+            return self._post_api_projects_add_29(p)
+        if p == "/api/projects/remove":                # unregister a project directory
+            return self._post_api_projects_remove_30(p)
+        if p == "/api/lint":                           # native receipt-carrying linter over a project
+            return self._post_api_lint_31(p)
+        if p == "/api/index":                          # drive the index engine over a project root
+            return self._post_api_index_32(p)
+        if p == "/api/discourse":                      # drive the chorus satellite over a gathered corpus
+            return self._post_api_discourse_33(p)
+        if p == "/api/discourse/corpora":              # discover gather corpora as discourse sources
+            return self._post_api_discourse_corpora_34(p)
+        if p == "/api/learn/animate":                  # a lesson -> a runnable manim scene (academy)
+            return self._post_api_learn_animate_35(p)
+        if p == "/api/discourse/digests":              # what the chorus daemon has synthesized
+            return self._post_api_discourse_digests_36(p)
+        if p == "/api/robustness/inject":              # measure the gated tool loop's injection containment
+            return self._post_api_robustness_inject_37(p)
+        if p == "/api/marketplace/install":            # catalog entry -> plugin registry
+            return self._post_api_marketplace_install_38(p)
+        if p == "/api/typeface":                       # mint a parametric face under witness
+            return self._post_api_typeface_39(p)
+        if p == "/api/typeface/publish":               # file an already-minted face in the gallery
+            return self._post_api_typeface_publish_40(p)
+        if p == "/api/studio/poster":                  # plate + minted face + copy, one receipt
+            return self._post_api_studio_poster_41(p)
+        if p == "/api/lanes/install":                  # one lane, installed on request
+            return self._post_api_lanes_install_42(p)
+        if p == "/api/plugins/call":                   # one tool call on a registered plugin
+            return self._post_api_plugins_call_43(p)
+        if p == "/api/telos/kernel":                   # run a bridged telos creative kernel
+            return self._post_api_telos_kernel_44(p)
+        if p == "/api/studio/graph":                   # branching creative DAG, Merkle receipt
+            return self._post_api_studio_graph_45(p)
+        if p == "/api/studio/pipeline":                # ordered stages, one chained receipt
+            return self._post_api_studio_pipeline_46(p)
+        if p == "/api/telos/raster":                   # dither / pixel-sort over a plate or PNG
+            return self._post_api_telos_raster_47(p)
+        if p == "/api/typeface/family":                # one seed, a product line of weights
+            return self._post_api_typeface_family_48(p)
+        if p == "/api/typeface/variable":              # the family as ONE variable font (wght axis)
+            return self._post_api_typeface_variable_49(p)
+        if p == "/api/studio/brandkit":                # one seed + a name -> a whole identity
+            return self._post_api_studio_brandkit_50(p)
+        if p == "/api/studio/sound":                   # the seeded chime study, score = receipt
+            return self._post_api_studio_sound_51(p)
+        if p == "/api/marketplace/add":                # a user catalog entry (env-var NAMES only)
+            return self._post_api_marketplace_add_52(p)
+        if p == "/api/marketplace/remove":             # drop a user catalog entry
+            return self._post_api_marketplace_remove_53(p)
+        if p == "/api/plugins/toggle":                 # enable/disable a custom plugin
+            return self._post_api_plugins_toggle_54(p)
+        if p == "/api/plugins/remove":                 # remove a custom plugin
+            return self._post_api_plugins_remove_55(p)
+        if p == "/api/lsp":                            # editor intelligence over any LSP server
+            return self._post_api_lsp_56(p)
+        if p == "/api/memory/note":                    # durable content-addressed note
+            return self._post_api_memory_note_57(p)
+        return self._json({"error": "not found"}, 404)
+
+    def _post_v1_chat_completions_0(self, p):
+        req, err = self._read_json(openai_error=True)
+        if err:
+            return self._json(*err)
+        if req.get("stream"):
+            return self._sse_chat(req)
+        from harness.scaffold import scaffold_answer, scaffold_turn
+        # hash and freeze the flattened prompt the model was actually
+        # sent, so the turn receipt is reproducible by a stranger
+        _sys, _prompt = _flatten_messages(req.get("messages", []))
+        env = scaffold_turn("\n".join(x for x in (_sys, _prompt) if x))
+        body, code, _r, _t, _m = openai_chat(req, self.serve_url)
+        if code == 200 and isinstance(body, dict):
             try:
-                threshold = min(1.0, max(0.1, float(req.get("threshold", 0.6))))
-            except (TypeError, ValueError):
-                threshold = 0.6
-            doc = explanation_receipt(diff, explanation, threshold=threshold,
-                                      reviewer=str(req.get("reviewer", "")))
+                content = body["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError):
+                content = ""
+            # extension field: OpenAI clients ignore unknown keys
+            body["flywheel_scaffold"] = scaffold_answer(
+                str(content or ""), env,
+                provenance={"endpoint": "v1",
+                            "model_ref": str(body.get("model") or "")})
+        return self._json(body, code)
+
+    def _post_v1_embeddings_1(self, p):
+        req, err = self._read_json(openai_error=True)
+        if err:
+            return self._json(*err)
+        body, code = openai_embeddings(req)
+        return self._json(body, code)
+
+    def _post_v1_2(self, p):
+        return self._proxy(self.serve_url.rstrip("/") + p)
+
+    def _post_api_forge_3(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        goal = (req.get("goal") or "").strip()
+        if not goal:
+            return self._json({"error": "provide a non-empty 'goal'"}, 400)
+        doc = _forge(
+            goal, examples=req.get("examples"),
+            documentation=req.get("documentation"),
+            context=req.get("context", ""),
+            intent_source=str(req.get("intent_source", "")),
+            architecture_source=str(req.get("architecture_source", "")))
+        if "error" not in doc:
+            # seal the Y-chain server-side so the later drift recheck
+            # never trusts the checked party for the sealed half
+            doc["prp_id"] = persist_forge_seal(
+                self.run_root, goal,
+                intent_sha256=str(doc.get("intent_sha256", "")),
+                architecture_sha256=str(doc.get("architecture_sha256", "")))
+        return self._json(doc)
+
+    def _post_api_academy_complete_4(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        lesson_id = str(req.get("lesson_id", "")).strip()
+        eid = str(req.get("comprehension_eid", "")).strip()
+        if not lesson_id or not eid:
+            return self._json({"error": "provide 'lesson_id' and "
+                                        "'comprehension_eid'"}, 400)
+        from harness.academy_pipeline import academy_complete
+        doc = academy_complete(lesson_id, eid)
+        return self._json(doc, 200 if doc.get("bound") else 400)
+
+    def _post_api_forge_recheck_5(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        if req.get("intent_sha256") or req.get("architecture_sha256"):
+            return self._json(
+                {"error": "caller-supplied sealed hashes are refused: "
+                          "the checked party must not author its own "
+                          "criterion. Provide 'prp_id' from the forge "
+                          "response; the seal is read server-side"}, 400)
+        out = forge_recheck(self.run_root, req.get("prp_id", ""), req)
+        return self._json(out, 400 if "error" in out else 200)
+
+    def _post_api_science_6(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        question = (req.get("question") or "").strip()
+        if not question:
+            return self._json({"error": "provide a non-empty 'question'"}, 400)
+        from harness.science_bench import science_run
+        try:
+            max_sources = max(1, min(int(req.get("max_sources", 4)), 10))
+        except (TypeError, ValueError):
+            max_sources = 4
+        claims = req.get("claims") if isinstance(req.get("claims"), list) else None
+        measurements = (req.get("measurements")
+                        if isinstance(req.get("measurements"), list) else None)
+        from pathlib import Path as _P
+        doc = science_run(
+            question, claims=claims, measurements=measurements,
+            max_sources=max_sources,
+            workdir=_P(self.run_root) / "science")
+        # history is best-effort: a full disk never blocks the answer,
+        # but an unpersisted run says so instead of pretending
+        try:
+            from harness.eval_store import save_science_run
+            doc["receipt_path"] = save_science_run(
+                self.run_root, doc)["receipt_path"]
+        except Exception as e:
+            doc["receipt_note"] = (
+                f"run not persisted: {type(e).__name__}: {e}")
+        return self._json(doc)
+
+    def _post_api_retrieve_7(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        query = (req.get("query") or "").strip()
+        if not query:
+            return self._json({"error": "provide a non-empty 'query'"}, 400)
+        root, err = _resolve_workspace_root(req.get("root"), self.root)
+        if err:
+            return self._json({"error": err}, 400)
+        try:
+            k = max(1, min(int(req.get("k", 8)), 50))
+        except (TypeError, ValueError):
+            k = 8
+        from harness.bm25_retrieval import build_index, search
+        index = build_index(root)
+        return self._json({"schema": "flywheel.retrieval/v1",
+                           "query": query,
+                           "hits": search(index, query, k=k),
+                           "indexed_files": index["files"],
+                           "skipped": index["skipped"]})
+
+    def _post_api_snapshot_8(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        url = (req.get("url") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            return self._json({"error": "provide an http(s) 'url'"}, 400)
+        from pathlib import Path as _P
+        from harness.web_snapshot import snapshot_url
+        doc = snapshot_url(url, _P(self.run_root) / "snapshots")
+        if "error" not in doc:
             try:
                 from harness.store import put_entity
-                doc["stored"] = put_entity("comprehension", doc).get("eid", "")
+                doc["stored"] = put_entity("web-snapshot", doc).get("eid", "")
             except Exception as e:
                 doc["stored"] = f"store unavailable: {type(e).__name__}"
-            return self._json(doc)
-        if p == "/api/attest":                        # ownership made checkable: sign-off bound to the walk
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            run_eid = (req.get("run_eid") or "").strip()
-            review = req.get("review") if isinstance(req.get("review"), dict) else None
-            files = req.get("reviewed_files")
-            if not run_eid or review is None or not isinstance(files, list):
-                return self._json({"error": "provide 'run_eid' (a banked "
-                                            "agent-run entity), 'review' (the "
-                                            "run's review doc, verified "
-                                            "against the banked hash), and "
-                                            "'reviewed_files' (a list); an "
-                                            "inline run doc is not accepted "
-                                            "because an attestation binds to "
-                                            "a run that actually happened"}, 400)
-            from harness.attestation import attest_banked
-            doc = attest_banked(run_eid, review, files,
-                                note=str(req.get("note", "")),
-                                reviewer=str(req.get("reviewer", "")))
-            if "error" in doc:
-                return self._json(doc, 409)
+        return self._json(doc)
+
+    def _post_api_import_9(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        root, err = _resolve_workspace_root(req.get("root"), self.root)
+        if err:
+            return self._json({"error": err}, 400)
+        from harness.import_adapters import import_config
+        doc = import_config(root)
+        try:
+            from harness.store import put_entity
+            doc["stored"] = put_entity("import-manifest", doc).get("eid", "")
+        except Exception as e:
+            doc["stored"] = f"store unavailable: {type(e).__name__}"
+        return self._json(doc)
+
+    def _post_api_lean_10(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        code = req.get("code") or ""
+        if not code.strip():
+            return self._json({"error": "provide non-empty 'code'"}, 400)
+        from harness.lean_oracle import lean_check
+        doc = lean_check(code)
+        try:
+            from harness.store import put_entity
+            doc["stored"] = put_entity("lean", doc).get("eid", "")
+        except Exception as e:
+            doc["stored"] = f"store unavailable: {type(e).__name__}"
+        return self._json(doc)
+
+    def _post_api_invent_11(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        k = req.get("k", 12)
+        if not isinstance(k, int) or isinstance(k, bool) or not 1 <= k <= 50:
+            return self._json({"error": "provide integer 'k' in 1..50"}, 400)
+        offset = req.get("offset", 0)
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            return self._json({"error": "'offset' must be a non-negative integer"}, 400)
+        from harness.conjecture_forge import forge_round
+        return self._json(forge_round(k, offset=offset))
+
+    def _post_api_scaffold_12(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        prompt = str(req.get("prompt") or "")
+        answer = str(req.get("answer") or "")
+        if not prompt and not answer:
+            return self._json({"error": "provide 'prompt' and/or 'answer'"}, 400)
+        from harness.scaffold import scaffold_answer, scaffold_turn
+        env = scaffold_turn(prompt)
+        cites = req.get("citations")
+        doc = scaffold_answer(answer, env,
+                              citations=cites if isinstance(cites, list)
+                              else None)
+        return self._json(doc)
+
+    def _post_api_suite_13(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        path = (req.get("path") or "").strip()
+        if not path:
+            return self._json({"error": "provide a project 'path'"}, 400)
+        mm = req.get("max_mutants", 5)
+        if not isinstance(mm, int) or isinstance(mm, bool) or not 1 <= mm <= 20:
+            return self._json({"error": "'max_mutants' must be an integer in 1..20"}, 400)
+        from harness.suite_audit import audit_suite
+        doc = audit_suite(path, oracle_cmd=str(
+            req.get("oracle_cmd", "python -m pytest tests/ -q")),
+            max_mutants=mm)
+        return self._json(doc, 400 if "error" in doc else 200)
+
+    def _post_api_tension_14(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        if not isinstance(req.get("a"), dict) or not isinstance(req.get("b"), dict):
+            return self._json({"error": "provide measurement objects 'a' and 'b'"}, 400)
+        from harness.tension_ledger import bank_tension
+        doc = bank_tension(req["a"], req["b"])
+        return self._json(doc, 400 if "error" in doc else 200)
+
+    def _post_api_capability_15(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        endpoint = (req.get("endpoint") or "").strip()
+        if not endpoint:
+            return self._json({"error": "provide a non-empty 'endpoint'"}, 400)
+        from harness.frontier import capability_probe
+        doc = capability_probe(endpoint)
+        if "error" not in doc:
+            if isinstance(req.get("disk_gb"), (int, float)):
+                doc["disk_gb"] = float(req["disk_gb"])
+                doc["disk_gb_source"] = "declared by caller"
             try:
                 from harness.store import put_entity
-                stored = put_entity("attestation", doc,
-                                    project=str(req.get("project", "")))
-                doc["stored"] = stored.get("eid", "")
-                doc["store_chain_hash"] = stored.get("chain_hash", "")
-            except Exception as e:                    # storing must not void the attestation
+                doc["stored"] = put_entity("capability", doc).get("eid", "")
+            except Exception as e:
                 doc["stored"] = f"store unavailable: {type(e).__name__}"
-            return self._json(doc)
-        if p == "/api/route":                         # universal router: send to ANY provider, with a receipt
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            prompt = (req.get("prompt") or "").strip()
-            endpoint = (req.get("endpoint") or "").strip()
-            if not prompt or not endpoint:
-                return self._json({"error": "provide non-empty 'prompt' and 'endpoint'"}, 400)
-            # the organs fire on every message: pre-pass freezes named
-            # sources, post-pass chains the turn receipt (scaffold.py)
-            from harness.scaffold import scaffold_answer, scaffold_turn
-            env = scaffold_turn(prompt)
-            body, code = route_request(prompt, endpoint)
-            if code == 200 and isinstance(body, dict):
-                body["scaffold"] = scaffold_answer(
-                    str(body.get("text", "")), env,
-                    provenance={"endpoint": endpoint,
-                                "model_ref": str(body.get("model_ref")
-                                                 or endpoint)})
-            return self._json(body, code)
-        if p == "/api/companion":                     # the seat: answer local, escalate the hard slice
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            prompt = (req.get("prompt") or "").strip()
-            if not prompt:
-                return self._json({"error": "provide a non-empty 'prompt'"}, 400)
-            seat = get_companion_seat(self.serve_url)
-            if seat is None:
-                return self._json({"error": "companion seat unavailable"}, 503)
-            from harness.scaffold import scaffold_answer, scaffold_turn
-            env = scaffold_turn(prompt)
-            body = companion_answer(seat, prompt, req.get("solution_sig", ""))
+        return self._json(doc)
+
+    def _post_api_retention_16(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        original = (req.get("original") or "").strip()
+        if not original or not isinstance(req.get("passed"), bool):
+            return self._json({"error": "provide 'original' (entity id) "
+                                        "and boolean 'passed'"}, 400)
+        from harness.retention import retention_record
+        return self._json(retention_record(
+            original, req["passed"], note=str(req.get("note", ""))))
+
+    def _post_api_explain_17(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        diff = req.get("diff") or ""
+        explanation = req.get("explanation") or ""
+        if not diff.strip() or not explanation.strip():
+            return self._json({"error": "provide 'diff' and 'explanation'"}, 400)
+        from harness.explanation_gate import explanation_receipt
+        try:
+            threshold = min(1.0, max(0.1, float(req.get("threshold", 0.6))))
+        except (TypeError, ValueError):
+            threshold = 0.6
+        doc = explanation_receipt(diff, explanation, threshold=threshold,
+                                  reviewer=str(req.get("reviewer", "")))
+        try:
+            from harness.store import put_entity
+            doc["stored"] = put_entity("comprehension", doc).get("eid", "")
+        except Exception as e:
+            doc["stored"] = f"store unavailable: {type(e).__name__}"
+        return self._json(doc)
+
+    def _post_api_attest_18(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        run_eid = (req.get("run_eid") or "").strip()
+        review = req.get("review") if isinstance(req.get("review"), dict) else None
+        files = req.get("reviewed_files")
+        if not run_eid or review is None or not isinstance(files, list):
+            return self._json({"error": "provide 'run_eid' (a banked "
+                                        "agent-run entity), 'review' (the "
+                                        "run's review doc, verified "
+                                        "against the banked hash), and "
+                                        "'reviewed_files' (a list); an "
+                                        "inline run doc is not accepted "
+                                        "because an attestation binds to "
+                                        "a run that actually happened"}, 400)
+        from harness.attestation import attest_banked
+        doc = attest_banked(run_eid, review, files,
+                            note=str(req.get("note", "")),
+                            reviewer=str(req.get("reviewer", "")))
+        if "error" in doc:
+            return self._json(doc, 409)
+        try:
+            from harness.store import put_entity
+            stored = put_entity("attestation", doc,
+                                project=str(req.get("project", "")))
+            doc["stored"] = stored.get("eid", "")
+            doc["store_chain_hash"] = stored.get("chain_hash", "")
+        except Exception as e:                    # storing must not void the attestation
+            doc["stored"] = f"store unavailable: {type(e).__name__}"
+        return self._json(doc)
+
+    def _post_api_route_19(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        prompt = (req.get("prompt") or "").strip()
+        endpoint = (req.get("endpoint") or "").strip()
+        if not prompt or not endpoint:
+            return self._json({"error": "provide non-empty 'prompt' and 'endpoint'"}, 400)
+        # the organs fire on every message: pre-pass freezes named
+        # sources, post-pass chains the turn receipt (scaffold.py)
+        from harness.scaffold import scaffold_answer, scaffold_turn
+        env = scaffold_turn(prompt)
+        body, code = route_request(prompt, endpoint)
+        if code == 200 and isinstance(body, dict):
             body["scaffold"] = scaffold_answer(
                 str(body.get("text", "")), env,
-                provenance={"endpoint": "companion",
-                            "model_ref": str(body.get("model_ref")
-                                             or body.get("source") or "")})
-            return self._json(body)
-        if p == "/api/agent":                          # the agentic tool loop over ANY provider
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            goal = (req.get("goal") or "").strip()
-            endpoint = (req.get("endpoint") or "").strip()
-            if not goal or not endpoint:
-                return self._json({"error": "provide non-empty 'goal' and 'endpoint'"}, 400)
-            if req.get("stream"):
-                return self._sse_agent(req, goal, endpoint)
-            effort = None
-            if req.get("effort"):
-                from harness.effort import resolve_effort
-                effort = resolve_effort(str(req["effort"]))
-            try:
-                max_steps = max(1, min(int(req.get("max_steps",
-                                            (effort or {}).get("max_steps", 6))), 12))
-            except (TypeError, ValueError):
-                max_steps = 6
-            root, err = _resolve_workspace_root(req.get("root"), self.root)
-            if err:
-                return self._json({"error": err}, 400)
-            # freeze the goal's named sources BEFORE the agent runs, so the
-            # pre-pass is a pre-pass (not an after-the-fact re-freeze)
-            from harness.scaffold import scaffold_answer as _sa, \
-                scaffold_turn as _st
-            env = _st(goal)
-            from harness.router_agent import run_router_agent
-            events: list = []
-            try:
-                result = run_router_agent(
-                    goal, endpoint, root=str(root),
-                    allow_write=bool(req.get("allow_write", False)),
-                    allow_exec=bool(req.get("allow_exec", False)),
-                    max_steps=max_steps, test_cmd=(req.get("test_cmd") or None),
-                    model=(req.get("model") or None),
-                    compact_budget=int(req.get("compact_budget", 0) or 0),
-                    on_event=events.append)
-            except Exception as e:
-                # failed runs land in history too, with their partial trace
-                try:
-                    from harness.eval_store import save_agent_run, trim_events
-                    save_agent_run(
-                        self.run_root,
-                        {"goal_excerpt": goal[:200], "endpoint": endpoint,
-                         "status": "ERROR",
-                         "error": f"{type(e).__name__}: {e}",
-                         "events": trim_events(events)})
-                except Exception:
-                    pass  # the 502 already carries the primary error
-                return self._json({"error": f"{type(e).__name__}: {e}"}, 502)
-            if effort is not None:
-                # stamp what was ENFORCED, not the nominal dial: a caller
-                # max_steps override past the dial, and this route not fanning
-                # out n_candidates, must show in the receipt
-                from harness.effort import stamp_applied
-                result["effort"] = stamp_applied(effort, max_steps_applied=max_steps,
-                                                 n_candidates_applied=False)
-            result["scaffold"] = _sa(
-                str(result.get("final") or ""), env,
                 provenance={"endpoint": endpoint,
-                            "model_ref": str(req.get("model") or endpoint)})
-            result["run_receipt"] = _countersign_run(result)
+                            "model_ref": str(body.get("model_ref")
+                                             or endpoint)})
+        return self._json(body, code)
+
+    def _post_api_companion_20(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        prompt = (req.get("prompt") or "").strip()
+        if not prompt:
+            return self._json({"error": "provide a non-empty 'prompt'"}, 400)
+        seat = get_companion_seat(self.serve_url)
+        if seat is None:
+            return self._json({"error": "companion seat unavailable"}, 503)
+        from harness.scaffold import scaffold_answer, scaffold_turn
+        env = scaffold_turn(prompt)
+        body = companion_answer(seat, prompt, req.get("solution_sig", ""))
+        body["scaffold"] = scaffold_answer(
+            str(body.get("text", "")), env,
+            provenance={"endpoint": "companion",
+                        "model_ref": str(body.get("model_ref")
+                                         or body.get("source") or "")})
+        return self._json(body)
+
+    def _post_api_agent_21(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        goal = (req.get("goal") or "").strip()
+        endpoint = (req.get("endpoint") or "").strip()
+        if not goal or not endpoint:
+            return self._json({"error": "provide non-empty 'goal' and 'endpoint'"}, 400)
+        if req.get("stream"):
+            return self._sse_agent(req, goal, endpoint)
+        effort = None
+        if req.get("effort"):
+            from harness.effort import resolve_effort
+            effort = resolve_effort(str(req["effort"]))
+        try:
+            max_steps = max(1, min(int(req.get("max_steps",
+                                        (effort or {}).get("max_steps", 6))), 12))
+        except (TypeError, ValueError):
+            max_steps = 6
+        root, err = _resolve_workspace_root(req.get("root"), self.root)
+        if err:
+            return self._json({"error": err}, 400)
+        # freeze the goal's named sources BEFORE the agent runs, so the
+        # pre-pass is a pre-pass (not an after-the-fact re-freeze)
+        from harness.scaffold import scaffold_answer as _sa, \
+            scaffold_turn as _st
+        env = _st(goal)
+        from harness.router_agent import run_router_agent
+        events: list = []
+        try:
+            result = run_router_agent(
+                goal, endpoint, root=str(root),
+                allow_write=bool(req.get("allow_write", False)),
+                allow_exec=bool(req.get("allow_exec", False)),
+                max_steps=max_steps, test_cmd=(req.get("test_cmd") or None),
+                model=(req.get("model") or None),
+                compact_budget=int(req.get("compact_budget", 0) or 0),
+                on_event=events.append)
+        except Exception as e:
+            # failed runs land in history too, with their partial trace
             try:
                 from harness.eval_store import save_agent_run, trim_events
-                result["run_id"] = save_agent_run(
+                save_agent_run(
                     self.run_root,
-                    dict(result, goal_excerpt=goal[:200],
-                         events=trim_events(events)))["run_id"]
-            except Exception as e:
-                result["receipt_note"] = (
-                    f"run not persisted: {type(e).__name__}: {e}")
-            return self._json(result)
-        if p == "/api/workflow":                       # staged run with a chained receipt, any endpoint
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            goal = (req.get("goal") or "").strip()
-            workflow = (req.get("workflow") or "").strip()
-            if not goal or not workflow:
-                return self._json({"error": "provide 'workflow' and a non-empty 'goal'"}, 400)
-            from harness.profiles import get_profile
-            from harness.workflows import run_workflow
-            profile = get_profile((req.get("profile") or "").strip()) or {}
-            root, err = _resolve_workspace_root(req.get("root"), self.root)
-            if err:
-                return self._json({"error": err}, 400)
-            try:
-                doc = run_workflow(
-                    workflow, goal, (req.get("endpoint") or "serve").strip(),
-                    root=str(root),
-                    allow_write=bool(req.get("allow_write", False)),
-                    allow_exec=bool(req.get("allow_exec", False)),
-                    allow_mcp=bool(req.get("allow_mcp", False)),
-                    test_cmd=(req.get("test_cmd") or None),
-                    system=profile.get("system", ""),
-                    run_root=self.run_root)
-            except Exception as e:
-                return self._json({"error": f"workflow failed: {type(e).__name__}: {e}"}, 502)
-            doc["run_countersign"] = _countersign_workflow(doc)
-            return self._json(doc)
-        if p == "/api/memory/recall":                  # verbatim recall from the fold index
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            query = (req.get("query") or "").strip()
-            if not query:
-                return self._json({"error": "provide a non-empty 'query'"}, 400)
-            from harness.memory_api import memory_recall
-            return self._json(memory_recall(self.run_root, query,
-                                            req.get("top_k", 5)))
-        if p == "/api/plugins/register":               # register a custom MCP server by argv
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.plugins import register_mcp
-            out = register_mcp(req.get("name", ""), req.get("command", []),
-                               (req.get("detail") or "").strip())
-            return self._json(out, 400 if "error" in out else 200)
-        if p == "/api/keychain/set":                   # store a secret in the OS keychain
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.keychain import keychain_set
-            out = keychain_set((req.get("name") or "").strip(),
-                               req.get("value") or "")
-            # The secret is now only in the OS store; nothing here logs or
-            # echoes it, and `req` goes out of scope with this request.
-            return self._json(out, 400 if "error" in out else 200)
-        if p == "/api/keychain/delete":                # remove a stored secret
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.keychain import keychain_delete
-            out = keychain_delete((req.get("name") or "").strip())
-            return self._json(out, 400 if "error" in out else 200)
-        if p == "/api/store/entity":                   # store a content-addressed entity
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.store import put_entity
-            out = put_entity((req.get("kind") or "").strip(),
-                             req.get("data") or {},
-                             project=(req.get("project") or "").strip())
-            return self._json(out, 400 if "error" in out else 200)
-        if p == "/api/store/query":                    # query entities by kind/project
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.store import query_entities
-            rows = query_entities(kind=(req.get("kind") or None),
-                                  project=(req.get("project") or None),
-                                  limit=int(req.get("limit", 200) or 200))
-            return self._json({"schema": "flywheel.store-query/v1",
-                               "entities": rows, "n": len(rows)})
-        if p == "/api/projects/add":                   # register a project directory
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.projects import add_project
-            out = add_project((req.get("root") or "").strip(),
-                              (req.get("name") or "").strip())
-            return self._json(out, 400 if "error" in out else 200)
-        if p == "/api/projects/remove":                # unregister a project directory
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.projects import remove_project
-            out = remove_project((req.get("root") or "").strip())
-            return self._json(out, 400 if "error" in out else 200)
-        if p == "/api/lint":                           # native receipt-carrying linter over a project
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            root, err = _resolve_workspace_root(req.get("root"), self.root)
-            if err:
-                return self._json({"error": err}, 400)
-            from harness.linter import lint_project
-            paths = req.get("paths") if isinstance(req.get("paths"), list) else None
-            out = lint_project(str(root), paths)
-            return self._json(out, 400 if "error" in out else 200)
-        if p == "/api/index":                          # drive the index engine over a project root
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            root, err = _resolve_workspace_root(req.get("root"), self.root)
-            if err:
-                return self._json({"error": err}, 400)
-            view = (req.get("view") or "summary").strip()
-            if view == "summary":
-                from harness.index_bridge import index_summary
-                return self._json(index_summary(str(root)))
-            from harness.index_bridge import index_view
-            out = index_view(str(root), view)
-            return self._json(out, 400 if "error" in out else 200)
-        if p == "/api/discourse":                      # drive the chorus satellite over a gathered corpus
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.chorus_bridge import discourse_digest
-            out = discourse_digest((req.get("corpus") or "").strip())
-            return self._json(out, 400 if "error" in out else 200)
-        if p == "/api/discourse/corpora":              # discover gather corpora as discourse sources
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.chorus_bridge import list_corpora
-            out = list_corpora((req.get("root") or "").strip())
-            return self._json(out, 400 if "error" in out else 200)
-        if p == "/api/learn/animate":                  # a lesson -> a runnable manim scene (academy)
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.manim_lesson import lesson_to_manim, scene_name, manimgl_available
-            lesson = req.get("lesson") if isinstance(req.get("lesson"), dict) else {}
-            return self._json({"schema": "flywheel.learn-animation/v1",
-                               "scene": scene_name(lesson),
-                               "source": lesson_to_manim(lesson),
-                               "renderable": manimgl_available()})
-        if p == "/api/discourse/digests":              # what the chorus daemon has synthesized
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.chorus_bridge import recent_digests
-            limit = req.get("limit")
-            out = recent_digests((req.get("store") or "").strip(),
-                                 limit=int(limit) if isinstance(limit, int) else 20)
-            return self._json(out, 400 if "error" in out else 200)
-        if p == "/api/robustness/inject":              # measure the gated tool loop's injection containment
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.injection_probe import probe
-            return self._json(probe(allow_write=bool(req.get("allow_write")),
-                                    allow_exec=bool(req.get("allow_exec"))))
-        if p == "/api/marketplace/install":            # catalog entry -> plugin registry
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.marketplace import install_from_catalog
-            out = install_from_catalog((req.get("name") or "").strip())
-            return self._json(out, 400 if "error" in out else 200)
-        if p == "/api/typeface":                       # mint a parametric face under witness
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.typeface_forge import mint
-            params = req.get("params") if isinstance(req.get("params"), dict) else {}
-            try:
-                seed = int(req.get("seed", 0))
-            except (TypeError, ValueError):
-                seed = 0
-            face = mint(params, seed=seed)
-            if req.get("ttf") and not face.get("refused"):
-                # the minted outlines as an installable TrueType file
-                import base64
-                from harness.typeface_ttf import to_ttf
-                family = str(req.get("family") or "Zentropy Mint")[:48]
-                face["ttf_b64"] = base64.b64encode(
-                    to_ttf(face, family=family)).decode("ascii")
-                face["ttf_family"] = family
-            if req.get("publish") and not face.get("refused"):
-                # file the face in the witnessed gallery so others can browse
-                # and reuse it; a refused face is never a product
-                from harness.typeface_gallery import publish_face
-                face["gallery"] = publish_face(
-                    face, family=str(req.get("family") or "Zentropy Mint"))
-            return self._json(face)
-        if p == "/api/typeface/publish":               # file an already-minted face in the gallery
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.typeface_forge import mint
-            from harness.typeface_ttf import to_ttf
-            from harness.typeface_gallery import publish_face
+                    {"goal_excerpt": goal[:200], "endpoint": endpoint,
+                     "status": "ERROR",
+                     "error": f"{type(e).__name__}: {e}",
+                     "events": trim_events(events)})
+            except Exception:
+                pass  # the 502 already carries the primary error
+            return self._json({"error": f"{type(e).__name__}: {e}"}, 502)
+        if effort is not None:
+            # stamp what was ENFORCED, not the nominal dial: a caller
+            # max_steps override past the dial, and this route not fanning
+            # out n_candidates, must show in the receipt
+            from harness.effort import stamp_applied
+            result["effort"] = stamp_applied(effort, max_steps_applied=max_steps,
+                                             n_candidates_applied=False)
+        result["scaffold"] = _sa(
+            str(result.get("final") or ""), env,
+            provenance={"endpoint": endpoint,
+                        "model_ref": str(req.get("model") or endpoint)})
+        result["run_receipt"] = _countersign_run(result)
+        try:
+            from harness.eval_store import save_agent_run, trim_events
+            result["run_id"] = save_agent_run(
+                self.run_root,
+                dict(result, goal_excerpt=goal[:200],
+                     events=trim_events(events)))["run_id"]
+        except Exception as e:
+            result["receipt_note"] = (
+                f"run not persisted: {type(e).__name__}: {e}")
+        return self._json(result)
+
+    def _post_api_workflow_22(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        goal = (req.get("goal") or "").strip()
+        workflow = (req.get("workflow") or "").strip()
+        if not goal or not workflow:
+            return self._json({"error": "provide 'workflow' and a non-empty 'goal'"}, 400)
+        from harness.profiles import get_profile
+        from harness.workflows import run_workflow
+        profile = get_profile((req.get("profile") or "").strip()) or {}
+        root, err = _resolve_workspace_root(req.get("root"), self.root)
+        if err:
+            return self._json({"error": err}, 400)
+        try:
+            doc = run_workflow(
+                workflow, goal, (req.get("endpoint") or "serve").strip(),
+                root=str(root),
+                allow_write=bool(req.get("allow_write", False)),
+                allow_exec=bool(req.get("allow_exec", False)),
+                allow_mcp=bool(req.get("allow_mcp", False)),
+                test_cmd=(req.get("test_cmd") or None),
+                system=profile.get("system", ""),
+                run_root=self.run_root)
+        except Exception as e:
+            return self._json({"error": f"workflow failed: {type(e).__name__}: {e}"}, 502)
+        doc["run_countersign"] = _countersign_workflow(doc)
+        return self._json(doc)
+
+    def _post_api_memory_recall_23(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        query = (req.get("query") or "").strip()
+        if not query:
+            return self._json({"error": "provide a non-empty 'query'"}, 400)
+        from harness.memory_api import memory_recall
+        return self._json(memory_recall(self.run_root, query,
+                                        req.get("top_k", 5)))
+
+    def _post_api_plugins_register_24(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.plugins import register_mcp
+        out = register_mcp(req.get("name", ""), req.get("command", []),
+                           (req.get("detail") or "").strip())
+        return self._json(out, 400 if "error" in out else 200)
+
+    def _post_api_keychain_set_25(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.keychain import keychain_set
+        out = keychain_set((req.get("name") or "").strip(),
+                           req.get("value") or "")
+        # The secret is now only in the OS store; nothing here logs or
+        # echoes it, and `req` goes out of scope with this request.
+        return self._json(out, 400 if "error" in out else 200)
+
+    def _post_api_keychain_delete_26(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.keychain import keychain_delete
+        out = keychain_delete((req.get("name") or "").strip())
+        return self._json(out, 400 if "error" in out else 200)
+
+    def _post_api_store_entity_27(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.store import put_entity
+        out = put_entity((req.get("kind") or "").strip(),
+                         req.get("data") or {},
+                         project=(req.get("project") or "").strip())
+        return self._json(out, 400 if "error" in out else 200)
+
+    def _post_api_store_query_28(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.store import query_entities
+        rows = query_entities(kind=(req.get("kind") or None),
+                              project=(req.get("project") or None),
+                              limit=int(req.get("limit", 200) or 200))
+        return self._json({"schema": "flywheel.store-query/v1",
+                           "entities": rows, "n": len(rows)})
+
+    def _post_api_projects_add_29(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.projects import add_project
+        out = add_project((req.get("root") or "").strip(),
+                          (req.get("name") or "").strip())
+        return self._json(out, 400 if "error" in out else 200)
+
+    def _post_api_projects_remove_30(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.projects import remove_project
+        out = remove_project((req.get("root") or "").strip())
+        return self._json(out, 400 if "error" in out else 200)
+
+    def _post_api_lint_31(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        root, err = _resolve_workspace_root(req.get("root"), self.root)
+        if err:
+            return self._json({"error": err}, 400)
+        from harness.linter import lint_project
+        paths = req.get("paths") if isinstance(req.get("paths"), list) else None
+        out = lint_project(str(root), paths)
+        return self._json(out, 400 if "error" in out else 200)
+
+    def _post_api_index_32(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        root, err = _resolve_workspace_root(req.get("root"), self.root)
+        if err:
+            return self._json({"error": err}, 400)
+        view = (req.get("view") or "summary").strip()
+        if view == "summary":
+            from harness.index_bridge import index_summary
+            return self._json(index_summary(str(root)))
+        from harness.index_bridge import index_view
+        out = index_view(str(root), view)
+        return self._json(out, 400 if "error" in out else 200)
+
+    def _post_api_discourse_33(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.chorus_bridge import discourse_digest
+        out = discourse_digest((req.get("corpus") or "").strip())
+        return self._json(out, 400 if "error" in out else 200)
+
+    def _post_api_discourse_corpora_34(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.chorus_bridge import list_corpora
+        out = list_corpora((req.get("root") or "").strip())
+        return self._json(out, 400 if "error" in out else 200)
+
+    def _post_api_learn_animate_35(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.manim_lesson import lesson_to_manim, scene_name, manimgl_available
+        lesson = req.get("lesson") if isinstance(req.get("lesson"), dict) else {}
+        return self._json({"schema": "flywheel.learn-animation/v1",
+                           "scene": scene_name(lesson),
+                           "source": lesson_to_manim(lesson),
+                           "renderable": manimgl_available()})
+
+    def _post_api_discourse_digests_36(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.chorus_bridge import recent_digests
+        limit = req.get("limit")
+        out = recent_digests((req.get("store") or "").strip(),
+                             limit=int(limit) if isinstance(limit, int) else 20)
+        return self._json(out, 400 if "error" in out else 200)
+
+    def _post_api_robustness_inject_37(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.injection_probe import probe
+        return self._json(probe(allow_write=bool(req.get("allow_write")),
+                                allow_exec=bool(req.get("allow_exec"))))
+
+    def _post_api_marketplace_install_38(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.marketplace import install_from_catalog
+        out = install_from_catalog((req.get("name") or "").strip())
+        return self._json(out, 400 if "error" in out else 200)
+
+    def _post_api_typeface_39(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.typeface_forge import mint
+        params = req.get("params") if isinstance(req.get("params"), dict) else {}
+        try:
+            seed = int(req.get("seed", 0))
+        except (TypeError, ValueError):
+            seed = 0
+        face = mint(params, seed=seed)
+        if req.get("ttf") and not face.get("refused"):
+            # the minted outlines as an installable TrueType file
             import base64
-            params = req.get("params") if isinstance(req.get("params"), dict) else {}
+            from harness.typeface_ttf import to_ttf
+            family = str(req.get("family") or "Zentropy Mint")[:48]
+            face["ttf_b64"] = base64.b64encode(
+                to_ttf(face, family=family)).decode("ascii")
+            face["ttf_family"] = family
+        if req.get("publish") and not face.get("refused"):
+            # file the face in the witnessed gallery so others can browse
+            # and reuse it; a refused face is never a product
+            from harness.typeface_gallery import publish_face
+            face["gallery"] = publish_face(
+                face, family=str(req.get("family") or "Zentropy Mint"))
+        return self._json(face)
+
+    def _post_api_typeface_publish_40(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.typeface_forge import mint
+        from harness.typeface_ttf import to_ttf
+        from harness.typeface_gallery import publish_face
+        import base64
+        params = req.get("params") if isinstance(req.get("params"), dict) else {}
+        try:
+            seed = int(req.get("seed", 0))
+        except (TypeError, ValueError):
+            seed = 0
+        face = mint(params, seed=seed)
+        if not face.get("refused"):
+            family = str(req.get("family") or "Zentropy Mint")[:48]
+            face["ttf_b64"] = base64.b64encode(
+                to_ttf(face, family=family)).decode("ascii")
+        out = publish_face(face, family=str(req.get("family") or "Zentropy Mint"))
+        return self._json(out, 400 if "error" in out else 200)
+
+    def _post_api_studio_poster_41(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.design_studio import compose
+        try:
+            seed = int(req.get("seed", 58))
+        except (TypeError, ValueError):
+            seed = 58
+        try:
+            density = float(req.get("density", 1.0))
+        except (TypeError, ValueError):
+            density = 1.0
+        out = compose(
+            str(req.get("title", "")),
+            subtitle=str(req.get("subtitle", "")),
+            fmt=str(req.get("format", "poster")),
+            seed=seed,
+            ground=str(req.get("ground", "dark")),
+            accent=bool(req.get("accent", True)),
+            face_params=req.get("face_params")
+            if isinstance(req.get("face_params"), dict) else None,
+            orb=str(req.get("orb", "auto")),
+            density=density,
+            want_svg=bool(req.get("svg")),
+            want_pdf=bool(req.get("pdf")))
+        return self._json(out, 400 if out.get("refused") else 200)
+
+    def _post_api_lanes_install_42(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        name = str(req.get("name", "")).strip()
+        if not name:
+            return self._json({"error": "provide a lane 'name'"}, 400)
+        profile = str(req.get("profile", "package")).strip() or "package"
+        from harness.lanes import install_lane
+        return self._json(install_lane(name, profile=profile))
+
+    def _post_api_plugins_call_43(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.plugins import call_plugin
+        out = call_plugin(str(req.get("name", "")).strip(),
+                          str(req.get("tool", "")).strip(),
+                          req.get("arguments")
+                          if isinstance(req.get("arguments"), dict) else {})
+        return self._json(out, 400 if "error" in out else 200)
+
+    def _post_api_telos_kernel_44(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.telos_kernels import run_kernel
+        out = run_kernel(str(req.get("kernel", "")).strip(),
+                         req.get("args")
+                         if isinstance(req.get("args"), dict) else {})
+        return self._json(out, 400 if "error" in out else 200)
+
+    def _post_api_studio_graph_45(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.creative_graph import run_graph
+        out = run_graph(req.get("nodes")
+                        if isinstance(req.get("nodes"), list) else [],
+                        req.get("edges")
+                        if isinstance(req.get("edges"), list) else [])
+        return self._json(out, 400 if out.get("refused") else 200)
+
+    def _post_api_studio_pipeline_46(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.creative_pipeline import run_pipeline
+        out = run_pipeline(req.get("stages")
+                           if isinstance(req.get("stages"), list) else [])
+        return self._json(out, 400 if out.get("refused") else 200)
+
+    def _post_api_telos_raster_47(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.raster_fx import apply_fx
+        out = apply_fx(str(req.get("kernel", "")).strip(),
+                       req.get("source")
+                       if isinstance(req.get("source"), dict) else None,
+                       req.get("args")
+                       if isinstance(req.get("args"), dict) else None)
+        return self._json(out, 400 if out.get("refused") else 200)
+
+    def _post_api_typeface_family_48(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.typeface_family import mint_family
+        try:
+            seed = int(req.get("seed", 58))
+        except (TypeError, ValueError):
+            seed = 58
+        out = mint_family(
+            req.get("params") if isinstance(req.get("params"), dict) else None,
+            seed=seed,
+            family=str(req.get("family") or "Zentropy Mint")[:48])
+        return self._json(out, 400 if out.get("refused") else 200)
+
+    def _post_api_typeface_variable_49(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.typeface_family import mint_variable_family
+        try:
+            seed = int(req.get("seed", 58))
+        except (TypeError, ValueError):
+            seed = 58
+        out = mint_variable_family(
+            req.get("params") if isinstance(req.get("params"), dict) else None,
+            seed=seed,
+            family=str(req.get("family") or "Zentropy Mint")[:48])
+        return self._json(out, 400 if out.get("refused") else 200)
+
+    def _post_api_studio_brandkit_50(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.brand_kit import mint_kit
+        try:
+            seed = int(req.get("seed", 58))
+        except (TypeError, ValueError):
+            seed = 58
+        out = mint_kit(str(req.get("name", "")), seed=seed,
+                       tagline=str(req.get("tagline", "")),
+                       face_params=req.get("face_params")
+                       if isinstance(req.get("face_params"), dict) else None)
+        return self._json(out, 400 if out.get("refused") else 200)
+
+    def _post_api_studio_sound_51(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.sound_studio import compose_sound
+        def _num(key, default):
             try:
-                seed = int(req.get("seed", 0))
+                return float(req.get(key, default))
             except (TypeError, ValueError):
-                seed = 0
-            face = mint(params, seed=seed)
-            if not face.get("refused"):
-                family = str(req.get("family") or "Zentropy Mint")[:48]
-                face["ttf_b64"] = base64.b64encode(
-                    to_ttf(face, family=family)).decode("ascii")
-            out = publish_face(face, family=str(req.get("family") or "Zentropy Mint"))
-            return self._json(out, 400 if "error" in out else 200)
-        if p == "/api/studio/poster":                  # plate + minted face + copy, one receipt
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.design_studio import compose
-            try:
-                seed = int(req.get("seed", 58))
-            except (TypeError, ValueError):
-                seed = 58
-            try:
-                density = float(req.get("density", 1.0))
-            except (TypeError, ValueError):
-                density = 1.0
-            out = compose(
-                str(req.get("title", "")),
-                subtitle=str(req.get("subtitle", "")),
-                fmt=str(req.get("format", "poster")),
-                seed=seed,
-                ground=str(req.get("ground", "dark")),
-                accent=bool(req.get("accent", True)),
-                face_params=req.get("face_params")
-                if isinstance(req.get("face_params"), dict) else None,
-                orb=str(req.get("orb", "auto")),
-                density=density,
-                want_svg=bool(req.get("svg")),
-                want_pdf=bool(req.get("pdf")))
-            return self._json(out, 400 if out.get("refused") else 200)
-        if p == "/api/lanes/install":                  # one lane, installed on request
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            name = str(req.get("name", "")).strip()
-            if not name:
-                return self._json({"error": "provide a lane 'name'"}, 400)
-            profile = str(req.get("profile", "package")).strip() or "package"
-            from harness.lanes import install_lane
-            return self._json(install_lane(name, profile=profile))
-        if p == "/api/plugins/call":                   # one tool call on a registered plugin
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.plugins import call_plugin
-            out = call_plugin(str(req.get("name", "")).strip(),
-                              str(req.get("tool", "")).strip(),
-                              req.get("arguments")
-                              if isinstance(req.get("arguments"), dict) else {})
-            return self._json(out, 400 if "error" in out else 200)
-        if p == "/api/telos/kernel":                   # run a bridged telos creative kernel
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.telos_kernels import run_kernel
-            out = run_kernel(str(req.get("kernel", "")).strip(),
-                             req.get("args")
-                             if isinstance(req.get("args"), dict) else {})
-            return self._json(out, 400 if "error" in out else 200)
-        if p == "/api/studio/graph":                   # branching creative DAG, Merkle receipt
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.creative_graph import run_graph
-            out = run_graph(req.get("nodes")
-                            if isinstance(req.get("nodes"), list) else [],
-                            req.get("edges")
-                            if isinstance(req.get("edges"), list) else [])
-            return self._json(out, 400 if out.get("refused") else 200)
-        if p == "/api/studio/pipeline":                # ordered stages, one chained receipt
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.creative_pipeline import run_pipeline
-            out = run_pipeline(req.get("stages")
-                               if isinstance(req.get("stages"), list) else [])
-            return self._json(out, 400 if out.get("refused") else 200)
-        if p == "/api/telos/raster":                   # dither / pixel-sort over a plate or PNG
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.raster_fx import apply_fx
-            out = apply_fx(str(req.get("kernel", "")).strip(),
-                           req.get("source")
-                           if isinstance(req.get("source"), dict) else None,
-                           req.get("args")
-                           if isinstance(req.get("args"), dict) else None)
-            return self._json(out, 400 if out.get("refused") else 200)
-        if p == "/api/typeface/family":                # one seed, a product line of weights
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.typeface_family import mint_family
-            try:
-                seed = int(req.get("seed", 58))
-            except (TypeError, ValueError):
-                seed = 58
-            out = mint_family(
-                req.get("params") if isinstance(req.get("params"), dict) else None,
-                seed=seed,
-                family=str(req.get("family") or "Zentropy Mint")[:48])
-            return self._json(out, 400 if out.get("refused") else 200)
-        if p == "/api/typeface/variable":              # the family as ONE variable font (wght axis)
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.typeface_family import mint_variable_family
-            try:
-                seed = int(req.get("seed", 58))
-            except (TypeError, ValueError):
-                seed = 58
-            out = mint_variable_family(
-                req.get("params") if isinstance(req.get("params"), dict) else None,
-                seed=seed,
-                family=str(req.get("family") or "Zentropy Mint")[:48])
-            return self._json(out, 400 if out.get("refused") else 200)
-        if p == "/api/studio/brandkit":                # one seed + a name -> a whole identity
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.brand_kit import mint_kit
-            try:
-                seed = int(req.get("seed", 58))
-            except (TypeError, ValueError):
-                seed = 58
-            out = mint_kit(str(req.get("name", "")), seed=seed,
-                           tagline=str(req.get("tagline", "")),
-                           face_params=req.get("face_params")
-                           if isinstance(req.get("face_params"), dict) else None)
-            return self._json(out, 400 if out.get("refused") else 200)
-        if p == "/api/studio/sound":                   # the seeded chime study, score = receipt
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.sound_studio import compose_sound
-            def _num(key, default):
-                try:
-                    return float(req.get(key, default))
-                except (TypeError, ValueError):
-                    return default
-            out = compose_sound(seed=int(_num("seed", 58)),
-                                duration=_num("duration", 24.0),
-                                root=_num("root", 220.0))
-            return self._json(out, 400 if out.get("refused") else 200)
-        if p == "/api/marketplace/add":                # a user catalog entry (env-var NAMES only)
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.marketplace import add_user_entry
-            out = add_user_entry(
-                str(req.get("name", "")),
-                req.get("command") if isinstance(req.get("command"), list) else [],
-                detail=str(req.get("detail", "")),
-                requires=req.get("requires")
-                if isinstance(req.get("requires"), list) else [])
-            return self._json(out, 400 if "error" in out else 200)
-        if p == "/api/marketplace/remove":             # drop a user catalog entry
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.marketplace import remove_user_entry
-            out = remove_user_entry(str(req.get("name", "")))
-            return self._json(out, 400 if "error" in out else 200)
-        if p == "/api/plugins/toggle":                 # enable/disable a custom plugin
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.plugins import toggle_mcp
-            out = toggle_mcp(req.get("name", ""), bool(req.get("enabled", True)))
-            return self._json(out, 400 if "error" in out else 200)
-        if p == "/api/plugins/remove":                 # remove a custom plugin
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            from harness.plugins import remove_mcp
-            out = remove_mcp(req.get("name", ""))
-            return self._json(out, 400 if "error" in out else 200)
-        if p == "/api/lsp":                            # editor intelligence over any LSP server
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            root, err = _resolve_workspace_root(req.get("root"), self.root)
-            if err:
-                return self._json({"error": err}, 400)
-            method = (req.get("method") or "definition").strip()
-            if method == "diagnostics":
-                from harness.lsp_diagnostics import lsp_diagnostics
-                out = lsp_diagnostics(
-                    req.get("command", []), str(root),
-                    (req.get("file") or "").strip(), req.get("text") or "",
-                    (req.get("language_id") or "plaintext").strip())
-            else:
-                from harness.lsp_bridge import lsp_query
-                out = lsp_query(
-                    req.get("command", []), str(root),
-                    (req.get("file") or "").strip(), req.get("text") or "",
-                    (req.get("language_id") or "plaintext").strip(),
-                    method,
-                    int(req.get("line", 0) or 0),
-                    int(req.get("character", 0) or 0))
-            return self._json(out, 400 if "error" in out else 200)
-        if p == "/api/memory/note":                    # durable content-addressed note
-            req, err = self._read_json()
-            if err:
-                return self._json(*err)
-            content = (req.get("content") or "").strip()
-            if not content:
-                return self._json({"error": "provide non-empty 'content'"}, 400)
-            from harness.memory_api import memory_note
-            return self._json(memory_note(self.run_root, content,
-                                          (req.get("role") or "note").strip() or "note"))
-        return self._json({"error": "not found"}, 404)
+                return default
+        out = compose_sound(seed=int(_num("seed", 58)),
+                            duration=_num("duration", 24.0),
+                            root=_num("root", 220.0))
+        return self._json(out, 400 if out.get("refused") else 200)
+
+    def _post_api_marketplace_add_52(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.marketplace import add_user_entry
+        out = add_user_entry(
+            str(req.get("name", "")),
+            req.get("command") if isinstance(req.get("command"), list) else [],
+            detail=str(req.get("detail", "")),
+            requires=req.get("requires")
+            if isinstance(req.get("requires"), list) else [])
+        return self._json(out, 400 if "error" in out else 200)
+
+    def _post_api_marketplace_remove_53(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.marketplace import remove_user_entry
+        out = remove_user_entry(str(req.get("name", "")))
+        return self._json(out, 400 if "error" in out else 200)
+
+    def _post_api_plugins_toggle_54(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.plugins import toggle_mcp
+        out = toggle_mcp(req.get("name", ""), bool(req.get("enabled", True)))
+        return self._json(out, 400 if "error" in out else 200)
+
+    def _post_api_plugins_remove_55(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        from harness.plugins import remove_mcp
+        out = remove_mcp(req.get("name", ""))
+        return self._json(out, 400 if "error" in out else 200)
+
+    def _post_api_lsp_56(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        root, err = _resolve_workspace_root(req.get("root"), self.root)
+        if err:
+            return self._json({"error": err}, 400)
+        method = (req.get("method") or "definition").strip()
+        if method == "diagnostics":
+            from harness.lsp_diagnostics import lsp_diagnostics
+            out = lsp_diagnostics(
+                req.get("command", []), str(root),
+                (req.get("file") or "").strip(), req.get("text") or "",
+                (req.get("language_id") or "plaintext").strip())
+        else:
+            from harness.lsp_bridge import lsp_query
+            out = lsp_query(
+                req.get("command", []), str(root),
+                (req.get("file") or "").strip(), req.get("text") or "",
+                (req.get("language_id") or "plaintext").strip(),
+                method,
+                int(req.get("line", 0) or 0),
+                int(req.get("character", 0) or 0))
+        return self._json(out, 400 if "error" in out else 200)
+
+    def _post_api_memory_note_57(self, p):
+        req, err = self._read_json()
+        if err:
+            return self._json(*err)
+        content = (req.get("content") or "").strip()
+        if not content:
+            return self._json({"error": "provide non-empty 'content'"}, 400)
+        from harness.memory_api import memory_note
+        return self._json(memory_note(self.run_root, content,
+                                      (req.get("role") or "note").strip() or "note"))
 
 
 def main(argv=None) -> int:
