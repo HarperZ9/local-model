@@ -712,9 +712,23 @@ def openai_chat(req: dict, serve_url: str):
     system, prompt = _flatten_messages(req.get("messages", []))
     if not prompt:
         return {"error": {"message": "messages must include a user turn", "type": "invalid_request_error"}}, 400, None, None, None
-    temperature = float(req.get("temperature", 0.0))
-    max_tokens = int(req.get("max_tokens", 512))
-    seed = int(req.get("seed", 0))
+    import math
+
+    def _num(v, default, cast):
+        # a present-but-null or non-numeric field degrades to its default rather
+        # than raising (which do_POST would turn into an opaque 500)
+        if v is None:
+            return default
+        try:
+            return cast(v)
+        except (TypeError, ValueError):
+            return default
+    temperature = _num(req.get("temperature", 0.0), 0.0, float)
+    max_tokens = _num(req.get("max_tokens", 512), 512, int)
+    seed = _num(req.get("seed", 0), 0, int)
+    if not math.isfinite(temperature):
+        return {"error": {"message": "temperature must be a finite number",
+                          "type": "invalid_request_error"}}, 400, None, None, None
     candidates = [m.strip() for m in str(req.get("model", "")).split(",") if m.strip()] or [""]
     # Opt-in adaptive routing: reorder the failover chain best-first by observed
     # success/cost and record each outcome. Off by default, so an explicit order is
@@ -1021,6 +1035,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _static(self, path: str):
         rel = path.lstrip("/") or "site/index.html"
+        # a static web root never serves dotfiles/dotdirs (.keys/, .git/, .env, ...)
+        if any(seg.startswith(".") for seg in rel.replace("\\", "/").split("/") if seg):
+            return self._json({"error": "forbidden"}, 403)
         target = (self.root / rel).resolve()
         # path-traversal guard: must stay inside root
         if self.root.resolve() not in target.parents and target != self.root.resolve():
@@ -1029,9 +1046,17 @@ class _Handler(BaseHTTPRequestHandler):
             target = target / "index.html"
         if not target.is_file():
             return self._json({"error": "not found"}, 404)
-        ctype = {"html": "text/html", "js": "text/javascript", "css": "text/css",
-                 "json": "application/json", "svg": "image/svg+xml"}.get(
-                     target.suffix.lstrip("."), "application/octet-stream")
+        # serve only known web asset types; a .key/.pem/.db/.md/... is never served,
+        # so an unknown-extension file under root cannot leak as octet-stream
+        ctype = {"html": "text/html", "js": "text/javascript", "mjs": "text/javascript",
+                 "css": "text/css", "json": "application/json", "svg": "image/svg+xml",
+                 "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                 "gif": "image/gif", "webp": "image/webp", "ico": "image/x-icon",
+                 "woff": "font/woff", "woff2": "font/woff2", "ttf": "font/ttf",
+                 "map": "application/json", "txt": "text/plain",
+                 "wasm": "application/wasm"}.get(target.suffix.lstrip(".").lower())
+        if ctype is None:
+            return self._json({"error": "not found"}, 404)
         body = target.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", ctype)
