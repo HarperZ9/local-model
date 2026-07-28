@@ -64,8 +64,11 @@ _NATIVE = [
 # the binary a CLI endpoint shells out to; presence on PATH gates usability
 _CLI_BINARY = {"claude-cli": "claude", "codex-cli": "codex", "opencode": "opencode"}
 # roster name -> the backend name build_endpoints actually produces, so a
-# usable-looking endpoint can actually be turned into a proposer
-_BUILD_ALIAS = {"claude-cli": "claude", "codex-cli": "codex"}
+# usable-looking endpoint can actually be turned into a proposer. These MUST
+# point at the subscription CliBackends ('*-plan'), not the API backends
+# ('claude'/'codex'): routing claude-cli/codex-cli must invoke the operator's
+# own client via its own auth, never the paid API path.
+_BUILD_ALIAS = {"claude-cli": "claude-plan", "codex-cli": "codex-plan"}
 
 
 def _credential(key_env: str, *, local: bool, kind: str = "", name: str = "") -> str:
