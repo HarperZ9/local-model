@@ -6,3 +6,10 @@
 *.ps1 text eol=crlf
 *.cmd text eol=crlf
 *.bat text eol=crlf
+
+# The model boundary receipt golden fixture is a byte-exact cross-repo pin
+# (same bytes, same seal, in buildlang's compiler/tests/fixtures/ of the same
+# name). A checkout-time CRLF smudge on autocrlf=true would silently break
+# the byte-identity test that reserializes it and compares raw bytes; pin it
+# to LF so a fresh clone can't drift from what was committed.
+tests/fixtures/model-receipt-golden.json text eol=lf
