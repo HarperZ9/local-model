@@ -141,6 +141,82 @@ def test_timeout_kills_the_whole_tree_not_just_the_shell(tmp_path):
                 pass
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-tree reaping; "
+                     "the Windows path kills via taskkill /T and is covered "
+                     "by test_oracle_hostile_candidate.py")
+def test_non_timeout_exception_during_communicate_still_kills_the_tree(
+        tmp_path, monkeypatch):
+    """Regression test: only subprocess.TimeoutExpired used to trigger
+    _kill_tree. Any other exception raised while proc.communicate() is
+    running -- a MemoryError from buffering unbounded candidate output, an
+    OSError off the pipe, a KeyboardInterrupt hitting mid-wait -- left the
+    (session-leader) process tree alive, leaking exactly like the bug this
+    file exists to close, just reachable via a different trigger.
+
+    Forces that path with a real spawned process (so a real grandchild can
+    leak) by making the *first* Popen.communicate() call raise OSError; the
+    real child keeps running in the background exactly as it would for a
+    genuine mid-run exception. The raise waits for the child to actually
+    reach the point of forking its own grandchild first -- an exception
+    "while communicate() is running" implies the process has had real
+    wall-clock time to act, not one hit at the instant of Popen()."""
+    pidfile = tmp_path / "grandchild.pid"
+    candidate = (
+        "import subprocess, sys, time\n"
+        "p = subprocess.Popen([sys.executable, '-c', "
+        "'import time; time.sleep(60)'])\n"
+        f"open({str(pidfile)!r}, 'w').write(str(p.pid))\n"
+        "time.sleep(60)\n"
+    )
+    task = _exec_task(tmp_path, "done")
+    orc = PythonExecutorOracle(expected="done", timeout=30)
+
+    import subprocess as sp
+    real_communicate = sp.Popen.communicate
+    calls = {"n": 0}
+
+    def flaky_communicate(self, *a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            deadline = time.monotonic() + 5
+            while not pidfile.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            raise OSError("simulated pipe failure mid-run")
+        return real_communicate(self, *a, **kw)
+
+    monkeypatch.setattr(sp.Popen, "communicate", flaky_communicate)
+
+    grandchild_pid = None
+    try:
+        result = orc.verify_dense(candidate, task)
+        assert result.status == "error:OSError", (
+            f"expected the simulated OSError to surface as status="
+            f"'error:OSError', got {result.status!r}")
+
+        deadline = time.monotonic() + 5
+        while not pidfile.exists() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert pidfile.exists(), (
+            "candidate never reached the point of recording its grandchild's "
+            "pid -- the test setup itself is broken, not the fix")
+        grandchild_pid = int(pidfile.read_text().strip())
+
+        # give the reaper a moment to land
+        deadline = time.monotonic() + 5
+        while _pid_alive(grandchild_pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not _pid_alive(grandchild_pid), (
+            f"grandchild pid {grandchild_pid} survived a non-timeout "
+            "exception raised during communicate(): only TimeoutExpired "
+            "triggered _kill_tree")
+    finally:
+        if grandchild_pid is not None and _pid_alive(grandchild_pid):
+            try:
+                os.kill(grandchild_pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+
 def test_failure_class_is_named_not_smuggled_in_the_output_hash(tmp_path):
     """The four failure classes must be distinguishable from the receipt
     without string-parsing output_hash: a timeout is not a wrong answer, and a

@@ -65,7 +65,22 @@ class PythonExecutorOracle(DenseOracle):
                               env=run_env(), stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE)
         try:
-            out, _ = proc.communicate(timeout=self.timeout)
+            try:
+                out, _ = proc.communicate(timeout=self.timeout)
+            except BaseException:
+                # subprocess.run() (what this call replaced) wrapped Popen in
+                # `with Popen(...) as process:` with a bare `except:` that
+                # killed the child before re-raising -- a blanket guarantee
+                # against any exception mid-run. Popen alone does not give
+                # that for free: TimeoutExpired is the common case, but a
+                # MemoryError from buffering unbounded candidate output, an
+                # OSError off the pipe, or a KeyboardInterrupt/SystemExit
+                # hitting mid-wait would all leave alive the very
+                # session-leader tree spawn_killable built specifically so
+                # _kill_tree could reap it. Kill first, unconditionally, then
+                # let the except clauses below classify (or re-raise) as before.
+                _kill_tree(proc)
+                raise
             got = out.decode("utf-8", errors="replace").strip()
             # a candidate that crashed (rc != 0) never passes, even when its
             # stdout happens to match — especially the empty-expected case,
@@ -85,8 +100,8 @@ class PythonExecutorOracle(DenseOracle):
         except subprocess.TimeoutExpired:
             # nothing ran to completion, so there is no output to witness:
             # output_hash stays empty and the class lives in status. The tree
-            # must not survive the timeout -- see spawn_killable above.
-            _kill_tree(proc)
+            # is already dead (killed above); this just drains whatever
+            # communicate() left on the pipes so the fds get closed.
             try:
                 proc.communicate(timeout=10)
             except Exception:
