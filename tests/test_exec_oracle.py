@@ -5,6 +5,9 @@ fails) AND that M6 verifier-guided search climbs a real quantitative task using
 it as the dense signal. This is the tool-augmented verification thesis (Qwythos
 7/7 with tools) made operational in our oracle registry.
 """
+import os
+import signal
+import time
 from pathlib import Path
 
 import pytest
@@ -67,6 +70,75 @@ def test_timeout_fails_gracefully(tmp_path):
     orc = PythonExecutorOracle(expected="done", timeout=2)
     r = orc.verify_dense("import time; time.sleep(10); print('done')", task)
     assert not r.passed and r.status == "timeout"
+
+
+def _pid_alive(pid: int) -> bool:
+    """True if `pid` is a live, non-zombie process. A zombie (state Z, dead
+    but not yet reaped by its parent) still answers os.kill(pid, 0) as if it
+    existed, which would make this probe flaky right around the reap window;
+    reading /proc/<pid>/stat lets a zombie count as gone, since it has
+    already stopped running and cannot resume the sleep this test plants."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            stat = f.read()
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    # comm is "(name)" and may itself contain ')'; state is the first field
+    # after the LAST ')'.
+    state = stat.rsplit(")", 1)[1].split()[0]
+    return state != "Z"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-tree reaping; "
+                     "the Windows path kills via taskkill /T and is covered "
+                     "by test_oracle_hostile_candidate.py")
+def test_timeout_kills_the_whole_tree_not_just_the_shell(tmp_path):
+    """Measured leak (2026-07-28): exec_oracle runs the candidate through
+    `shell=True`, and a bare subprocess.run(..., timeout=) kills only the
+    shell on expiry -- the candidate, and anything the candidate itself
+    spawned, is a grandchild of that shell and survives as an orphan. A
+    hostile or merely slow candidate must cost one timeout, never a leaked
+    process tree (the same contract PR #16 gave oracle.py's PytestOracle via
+    spawn_killable)."""
+    pidfile = tmp_path / "grandchild.pid"
+    candidate = (
+        "import subprocess, sys, time\n"
+        "p = subprocess.Popen([sys.executable, '-c', "
+        "'import time; time.sleep(60)'])\n"
+        f"open({str(pidfile)!r}, 'w').write(str(p.pid))\n"
+        "time.sleep(60)\n"
+    )
+    task = _exec_task(tmp_path, "done")
+    orc = PythonExecutorOracle(expected="done", timeout=2)
+
+    grandchild_pid = None
+    try:
+        result = orc.verify_dense(candidate, task)
+        assert result.status == "timeout", (
+            f"expected the 2s-timeout oracle call to report status='timeout', "
+            f"got {result.status!r}")
+
+        deadline = time.monotonic() + 5
+        while not pidfile.exists() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert pidfile.exists(), (
+            "candidate never reached the point of recording its grandchild's "
+            "pid -- the test setup itself is broken, not the fix")
+        grandchild_pid = int(pidfile.read_text().strip())
+
+        # give the reaper a moment to land
+        deadline = time.monotonic() + 5
+        while _pid_alive(grandchild_pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not _pid_alive(grandchild_pid), (
+            f"grandchild pid {grandchild_pid} survived the oracle timeout: "
+            "shell=True's timeout killed the shell but not the tree it spawned")
+    finally:
+        if grandchild_pid is not None and _pid_alive(grandchild_pid):
+            try:
+                os.kill(grandchild_pid, signal.SIGKILL)
+            except OSError:
+                pass
 
 
 def test_failure_class_is_named_not_smuggled_in_the_output_hash(tmp_path):
